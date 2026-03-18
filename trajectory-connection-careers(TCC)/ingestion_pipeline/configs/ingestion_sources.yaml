@@ -1,0 +1,14 @@
+sources:
+  github:
+    collector_class: "src.ingestion.collectors.github_collector.GitHubCollector"
+    raw_dir: "data/raw/profiles/github"
+    rate_limit: 10
+    max_retries: 3
+  kaggle:
+    collector_class: "src.ingestion.collectors.kaggle_collector.KaggleCollector"
+    raw_dir: "data/raw/profiles/kaggle"
+    max_retries: 3
+    seed_competitions:
+      - "titanic"
+      - "house-prices-advanced-regression-techniques"
+      - "digit-recognizer"

@@ -1,0 +1,30 @@
+2026-03-13 18:32:22 | ingestion                | INFO     | === Ingestion pipeline started (source=github) ===
+2026-03-13 18:32:22 | ingestion.collectors.github | INFO     | Starting collection for source=github
+2026-03-13 18:32:22 | ingestion.collectors.github | INFO     | Fetching GitHub data for user=octocat
+2026-03-13 18:32:23 | ingestion.utils          | INFO     | Saved /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/github_2026-03-13T13-02-23.json (51250 bytes)
+2026-03-13 18:32:23 | ingestion.collectors.github | INFO     | Saved 1 records → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/github_2026-03-13T13-02-23.json
+2026-03-13 18:32:23 | ingestion.collectors.github | INFO     | Collection complete for source=github
+2026-03-13 18:32:23 | ingestion                | INFO     | === Ingestion complete → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/github_2026-03-13T13-02-23.json ===
+2026-03-13 18:33:18 | ingestion                | INFO     | === Ingestion pipeline started (source=kaggle) ===
+2026-03-13 18:33:18 | ingestion.collectors.kaggle | INFO     | Starting collection for source=kaggle
+2026-03-13 18:33:18 | ingestion.collectors.kaggle | INFO     | Reading local dataset: /Users/khushimahesh/Desktop/SEM 6/genai/proj/datasets/datasciencejobs/Data Science Job Posts 2025.csv
+2026-03-13 18:33:18 | ingestion.collectors.kaggle | INFO     | Loaded 944 raw records from Data Science Job Posts 2025.csv
+2026-03-13 18:33:18 | ingestion.utils          | INFO     | Saved /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/kaggle/kaggle_2026-03-13T13-03-18.json (436853 bytes)
+2026-03-13 18:33:18 | ingestion.collectors.kaggle | INFO     | Saved 944 records → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/kaggle/kaggle_2026-03-13T13-03-18.json
+2026-03-13 18:33:18 | ingestion.collectors.kaggle | INFO     | Collection complete for source=kaggle
+2026-03-13 18:33:18 | ingestion                | INFO     | === Ingestion complete → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/kaggle/kaggle_2026-03-13T13-03-18.json ===
+2026-03-13 19:02:06 | ingestion                | INFO     | === Ingestion pipeline started (source=github) ===
+2026-03-13 19:02:06 | ingestion.collectors.github | INFO     | Starting async collection for 2 users (concurrency=5)
+2026-03-13 19:02:06 | ingestion.collectors.github | INFO     | Collecting data for user=octocat
+2026-03-13 19:02:06 | ingestion.collectors.github | INFO     | Collecting data for user=torvalds
+2026-03-13 19:02:15 | ingestion.collectors.github_client | INFO     | Reached max_pages=3 for https://api.github.com/repos/torvalds/linux/commits
+2026-03-13 19:02:16 | ingestion.collectors.github_client | INFO     | Reached max_pages=2 for https://api.github.com/repos/octocat/linguist/contributors
+2026-03-13 19:02:16 | ingestion.collectors.github | INFO     | Collected data for user=octocat: 8 repos, 5 languages, 5 commit sets, 0 events, 5 contributor sets
+2026-03-13 19:02:18 | ingestion.collectors.github | WARNING  | Failed to fetch contributors for torvalds/linux: 403, message='Forbidden', url='https://api.github.com/repos/torvalds/linux/contributors?per_page=100'
+2026-03-13 19:02:19 | ingestion.collectors.github | INFO     | Collected data for user=torvalds: 11 repos, 5 languages, 5 commit sets, 89 events, 5 contributor sets
+2026-03-13 19:02:19 | ingestion.utils          | INFO     | Saved /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/octocat.json (331663 bytes)
+2026-03-13 19:02:19 | ingestion.collectors.github | INFO     | Saved user data → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/octocat.json
+2026-03-13 19:02:19 | ingestion.utils          | INFO     | Saved /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/torvalds.json (2928145 bytes)
+2026-03-13 19:02:19 | ingestion.collectors.github | INFO     | Saved user data → /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github/torvalds.json
+2026-03-13 19:02:19 | ingestion.collectors.github | INFO     | Async collection complete: 2/2 users saved
+2026-03-13 19:02:19 | ingestion                | INFO     | === Ingestion complete — 2 user(s) saved to /Users/khushimahesh/Desktop/SEM 6/genai/proj/trajectory-connection-careers(TCC)/data/raw/github ===

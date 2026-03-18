@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Data
+ingestion_pipeline/data/raw/
+*.json
+*.csv
+
+# OS
+.DS_Store
+
+# Session
+ingestion_pipeline/linkedin_session.json
