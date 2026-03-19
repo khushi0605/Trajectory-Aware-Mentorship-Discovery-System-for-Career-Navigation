@@ -18,8 +18,10 @@ def load_config(config_path: str):
         return yaml.safe_load(f)
 
 def run_pipeline(source: str, usernames: Optional[List[str]] = None, batch_limit: int = 10):
-    config_path = "configs/ingestion_sources.yaml"
-    config = load_config(config_path)
+    # Resolve config path relative to this file's parent (src/pipeline/)
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    config_path = base_dir / "configs" / "ingestion_sources.yaml"
+    config = load_config(str(config_path))
     
     logger.info(f"Initialized ingestion for source: {source}")
     

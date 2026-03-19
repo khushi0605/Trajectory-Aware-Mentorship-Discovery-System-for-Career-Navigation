@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Data
+data/
+*.json
+*.csv
+!_role_skill_map.json
+!skills_taxonomy.json
+!domain_map.json
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+
+# Session / Temp
+linkedin_session.json
+.pytest_cache/
+.coverage
+htmlcov/

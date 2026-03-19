@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from src.core.interfaces import ICollector
 from src.core.utils import save_json
 from src.ingestion.collectors.github_client import GitHubClient, GITHUB_API_BASE
-
 from src.storage.raw_repo import RawRepo
 from src.ingestion.routing.data_router import DataRouter
 

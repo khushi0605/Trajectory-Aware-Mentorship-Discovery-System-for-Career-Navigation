@@ -15,7 +15,7 @@ logger = logging.getLogger("src.main")
 # CONFIGURATION: Define sources and identifiers here
 INGESTION_CONFIG = {
     "github": {
-        "usernames": ["octocat", "torvalds"]
+        "usernames": ["octocat", "torvalds", "khushi0605"]
     },
     # "kaggle": {
     #     "batch_limit": 5
