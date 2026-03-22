@@ -8,11 +8,11 @@ env/
 
 # Data
 data/
-*.json
-*.csv
-!_role_skill_map.json
-!skills_taxonomy.json
-!domain_map.json
+!data/reference/
+!data/reference/*.json
+!data/reference/*.txt
+!data/processed/job_req_profiles/
+!data/processed/job_req_profiles/*.json
 
 # Logs
 logs/
