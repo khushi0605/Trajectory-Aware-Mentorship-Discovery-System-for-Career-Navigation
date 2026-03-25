@@ -125,9 +125,18 @@ class Neo4jIngestor:
             uid = prof.get("user_id", prof.get("username", "unknown"))
             lvl = prof.get("experience_level", prof.get("career_stage", "unknown"))
             
-            # Transform skills dict into list of dicts
-            skills_dict = prof.get("skills", {})
-            skills_arr = [{"name": k.lower(), "weight": float(v)} for k, v in skills_dict.items()] if isinstance(skills_dict, dict) else []
+            # Robust skills parsing
+            skills_raw = prof.get("skills", {})
+            skills_arr = []
+            if isinstance(skills_raw, dict):
+                skills_arr = [{"name": k.lower(), "weight": float(v)} for k, v in skills_raw.items()]
+            elif isinstance(skills_raw, list):
+                if skills_raw and isinstance(skills_raw[0], dict):
+                    # List of dicts structure: [{"name": "cpp", "weight": 0.14}, ...]
+                    skills_arr = [{"name": s.get("name", "").lower(), "weight": float(s.get("weight", 1.0))} for s in skills_raw if s.get("name")]
+                elif skills_raw and isinstance(skills_raw[0], str):
+                    # List of strings: ["python", "java"]
+                    skills_arr = [{"name": s.lower(), "weight": 1.0} for s in skills_raw]
             
             candidates_payload.append({
                 "user_id": uid,

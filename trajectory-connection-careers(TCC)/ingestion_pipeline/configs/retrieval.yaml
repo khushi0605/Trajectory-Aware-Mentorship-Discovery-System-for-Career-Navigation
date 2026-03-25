@@ -1,0 +1,15 @@
+neo4j:
+  uri: "${NEO4J_URI:-bolt://localhost:7687}"
+  user: "${NEO4J_USER:-neo4j}"
+  password: "${NEO4J_PASSWORD:-password}"
+
+chroma:
+  persist_directory: "data/chroma_db"
+  collection_name: "medium_narratives"
+  embedding_model: "all-MiniLM-L6-v2"
+
+retrieval_params:
+  top_k_chroma: 5
+  neo4j_result_limit: 10
+  timeout_seconds: 10
+  eacr_behavioral_limit: 10

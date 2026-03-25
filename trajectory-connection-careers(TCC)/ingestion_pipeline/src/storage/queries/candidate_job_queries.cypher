@@ -32,3 +32,26 @@ ORDER BY c.user_id;
 MATCH path=(c:Candidate {user_id: 'user_ac9f7c933787'})-[*1..2]-()
 RETURN path
 LIMIT 50;
+
+// 6️⃣ Find candidates who faced the same struggle type as candidate X
+MATCH (c:Candidate {user_id: 'user_ac9f7c933787'})-[:FACED]->(s:Struggle)-[:IN_DOMAIN]->(d:Domain)
+MATCH (other:Candidate)-[:FACED]->(s2:Struggle)-[:IN_DOMAIN]->(d)
+WHERE other.user_id <> 'user_ac9f7c933787'
+RETURN other.user_id, s2.text, d.name ORDER BY d.name;
+
+// 7️⃣ Find candidates who made the same role transition
+MATCH (c:Candidate)-[:MADE_DECISION]->(dec:Decision)-[:TRIGGERED_TRANSITION {
+  from_role: 'software_engineer', to_role: 'data_scientist'
+}]->(j:Job)
+RETURN c.user_id, dec.text, dec.confidence ORDER BY dec.confidence DESC;
+
+// 8️⃣ Find candidates whose learning patterns share a theme with a query list
+MATCH (c:Candidate)-[:LEARNED_VIA]->(lp:LearningPattern)
+WHERE any(theme IN ['machine_learning', 'backend'] WHERE lp.themes CONTAINS theme)
+RETURN c.user_id, lp.text, lp.themes;
+
+// 9️⃣ Shortest reachability path between two candidates via shared Skill + Decision
+MATCH path = shortestPath(
+  (a:Candidate {user_id: 'user_ac9f7c933787'})-[:HAS_SKILL|MADE_DECISION*..6]-(b:Candidate {user_id: 'user_76f9f0b30307'})
+)
+RETURN path;

@@ -1,11 +1,14 @@
 import logging
+import argparse
+import asyncio
 from dotenv import load_dotenv
-from src.pipeline.ingestion_orchestrator import run_pipeline
+from src.pipeline.ingestion_orchestrator import run_pipeline as run_ingestion
+from src.app.runner import run_pipeline as run_career_mentorship
 
 # Authenticate and load environment variables
 load_dotenv()
 
-# Configure batch logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(name)s | %(levelname)s | %(message)s'
