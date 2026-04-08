@@ -40,39 +40,44 @@ class GeminiClient:
             max_output_tokens=max_t,
         )
 
-        try:
-            # We use a combined prompt or chat history. 
-            # SDK-specific: system_instruction is passed at model init or per call in some versions.
-            # For this version of SDK, we often prepend to user prompt or use chat session.
-            # Using model with system_instruction is preferred if supported.
-            model = genai.GenerativeModel(
-                model_name=self.config.model,
-                system_instruction=system_prompt if system_prompt else None
-            )
-            
-            # Use asyncio to make it non-blocking if needed, 
-            # though the SDK's generate_content is synchronous by default.
-            # We wrap it in a thread for real async behavior.
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: model.generate_content(
-                    user_prompt,
-                    generation_config=generation_config
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # We use a combined prompt or chat history. 
+                # SDK-specific: system_instruction is passed at model init or per call in some versions.
+                # For this version of SDK, we often prepend to user prompt or use chat session.
+                # Using model with system_instruction is preferred if supported.
+                model = genai.GenerativeModel(
+                    model_name=self.config.model,
+                    system_instruction=system_prompt if system_prompt else None
                 )
-            )
-            
-            if not response.text:
-                raise LLMParseError("Gemini returned an empty response")
                 
-            return response.text
+                # Use asyncio to make it non-blocking if needed
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, 
+                    lambda: model.generate_content(
+                        user_prompt,
+                        generation_config=generation_config
+                    )
+                )
+                
+                if not response.text:
+                    raise LLMParseError("Gemini returned an empty response")
+                    
+                return response.text
 
-        except google_exceptions.ResourceExhausted:
-            logger.error("Gemini API rate limit exceeded.")
-            raise LLMRateLimitError("Rate limit exceeded for Gemini API")
-        except Exception as e:
-            logger.error(f"Gemini API call failed: {e}")
-            raise
+            except google_exceptions.ResourceExhausted as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 30 # 30s, 60s
+                    logger.warning(f"Gemini API rate limit exceeded. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error("Gemini API rate limit exceeded. All retries failed.")
+                    raise LLMRateLimitError("Rate limit exceeded for Gemini API after multiple retries")
+            except Exception as e:
+                logger.error(f"Gemini API call failed: {e}")
+                raise
 
     async def generate_structured(
         self,
@@ -109,28 +114,51 @@ class GeminiClient:
             generation_config=gen_config
         )
 
-        async def _attempt():
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: model.generate_content(
-                    user_prompt,
-                    generation_config=gen_config # Redundant but safe
-                )
-            )
-            
-            if not response.text:
-                raise LLMParseError("Gemini returned an empty response")
+        async def _attempt_with_retry():
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None, 
+                        lambda: model.generate_content(
+                            user_prompt,
+                            generation_config=gen_config
+                        )
+                    )
+                    
+                    if not response.text:
+                        raise LLMParseError("Gemini returned an empty response")
+                        
+                    logger.debug(f"Received LLM response (length: {len(response.text)})")
+                    
+                    try:
+                        if getattr(response, "candidates", None) and getattr(response.candidates[0], "finish_reason", None):
+                            reason = response.candidates[0].finish_reason
+                            if reason and hasattr(reason, "name") and reason.name != "STOP":
+                                logger.warning(f"LLM Generation did not finish normally! Reason: {reason.name}")
+                    except Exception as log_e:
+                        logger.debug(f"Could not log finish reason: {log_e}")
+                        
+                    return ResponseParser.validate_against(response.text, response_schema)
                 
-            logger.debug(f"Received LLM response (length: {len(response.text)})")
-            return ResponseParser.validate_against(response.text, response_schema)
+                except google_exceptions.ResourceExhausted as e:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 30
+                        logger.warning(f"Gemini API rate limit exceeded. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise LLMRateLimitError("Rate limit exceeded for Gemini API after multiple retries")
+                except LLMParseError as parse_error:
+                    # Inherit retry logic for parse errors if you want, 
+                    # but here we specifically handle ResourceExhausted.
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Parse error on attempt {attempt+1}. Retrying...")
+                        continue
+                    raise parse_error
 
         try:
-            return await _attempt()
-        except LLMParseError as first_error:
-            logger.warning(f"First LLM attempt failed: {first_error}. Retrying...")
-            try:
-                return await _attempt()
-            except LLMParseError as second_error:
-                logger.error(f"Second LLM attempt failed: {second_error}")
-                raise second_error
+            return await _attempt_with_retry()
+        except Exception as e:
+            logger.error(f"Structured LLM attempt failed: {e}")
+            raise e

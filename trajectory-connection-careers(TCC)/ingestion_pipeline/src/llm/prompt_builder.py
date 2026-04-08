@@ -30,11 +30,11 @@ class PromptBuilder:
         Implements token budget truncation logic.
         """
         # Truncation logic (order: narratives -> behavioral -> reasoning)
-        # 1. Narratives to top 3
-        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:3]
+        # 1. Narratives to top 10
+        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:10]
         
-        # 2. Behavioral to top 5 (simulating domain match by keeping first 5)
-        behavioral = context.behavioral_signals[:5]
+        # 2. Behavioral to top 20
+        behavioral = context.behavioral_signals[:20]
         
         # 3. Paths (never truncated by count)
         paths = context.trajectory_paths
@@ -46,10 +46,10 @@ class PromptBuilder:
         for i, p in enumerate(paths, 1):
             # Reasoning truncation logic: if we were over budget (simulated by length check)
             # For now, let's just stick to the requested format
-            lines.append(f"[{i}] candidate_id: {p.candidate_id} | reachability: {p.reachability_score}")
-            lines.append(f"    decision: \"{p.decision_text}\"")
+            lines.append(f"[{i}] candidate_id: {p.candidate_id} | avg_reachability: {p.reachability_score}")
+            lines.append(f"    key_decision: \"{p.decision_text}\"")
             lines.append(f"    trigger: \"{p.trigger}\"")
-            lines.append(f"    path: {p.target_role}") # Simplified path for now as per model
+            lines.append(f"    path_description: {p.target_role}") # Simplified path for now as per model
             
         lines.append("\n=== BEHAVIORAL SIGNALS ===")
         for s in behavioral:
@@ -64,15 +64,28 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def for_profile_understanding(self, raw_user_input: str) -> Tuple[str, str]:
-        system = """You are a structured data extractor. Parse the user's input into the exact
-JSON schema below. Extract what is explicitly stated. Do not infer or expand.
+        system = """You are a structured data extractor. Parse the user's input into the exact JSON schema below.
+
+CRITICAL RULE FOR "goal" FIELD: You MUST map the user's intent to ONE normalized role slug from this list:
+ml_engineer, data_scientist, data_engineer, software_engineer, research_scientist,
+frontend_developer, backend_developer, devops_engineer, cloud_engineer,
+computer_vision_engineer, nlp_engineer, ai_engineer, fullstack_developer,
+ios_mobile_app_engineer, android_developer, product_manager, security_engineer
+
+If the user says "not sure" or "help me connect", infer the closest role from their interest.
+If they mention multiple options (e.g. "healthcare tech or big data"), pick the most specific one.
+NEVER put a full sentence in "goal". Only a role slug like "ml_engineer".
+
+RESUME HANDLING: If a RESUME CONTEXT section is present in the input, extract skills,
+background, and experience level from it. Prioritise explicit facts from the resume
+over inferred facts from the query alone. The USER QUERY contains the stated goal.
 
 Return ONLY this JSON:
 {
   "background": "string — current role or education level",
   "skills": ["list of explicitly mentioned skills"],
-  "interest": "string — domain or technology area of interest",
-  "goal": "string — target role, outcome, or options being considered (e.g. 'research or industry')",
+  "interest": "string — primary domain or technology area (e.g. 'machine learning', 'computer vision')",
+  "goal": "string — ONE normalized role slug from the list above",
   "confusion": "string or null — any expressed uncertainty",
   "experience_level": "student|junior|mid|senior"
 }"""
@@ -87,9 +100,16 @@ user profile. Your task is to describe the career paths supported by the data.
 
 RULES:
 1. Only describe paths present in TRAJECTORY PATHS section of CONTEXT.
-2. For each path, cite the candidate_id(s) that support it.
-3. Order paths by average reachability score (highest first).
+2. For each path, cite the candidate_id(s) that support it in supporting_candidate_ids.
+3. Order paths by avg_reachability score (highest first).
 4. If fewer than 2 paths exist in context, set "data_sufficient": false.
+
+FIELD EXTRACTION GUIDE (non-negotiable):
+- "avg_reachability": Use the value after "avg_reachability:" in the CONTEXT for each candidate. Average it across supporting candidates.
+- "key_decision": Use the text after "key_decision:" in the CONTEXT. Never set this to "unknown" if the key_decision field is present in CONTEXT.
+- "path_description": Summarise the role transition shown in path_description field of CONTEXT.
+- "estimated_hops": Count the number of "->" separators in the path_description, then add 1. If the path has 2 roles, hops = 1. If you cannot determine this, use 1 as the default.
+- "supporting_candidate_ids": List the candidate_id values of ALL candidates whose avg_reachability you averaged.
 
 Return ONLY this JSON schema: CareerPathOptions"""
         
@@ -100,6 +120,7 @@ Return ONLY this JSON schema: CareerPathOptions"""
 - Goal: {profile.goal}
 
 Describe the career paths available based on the context above."""
+
         return (system, user)
 
     def for_experience_analysis(self, context: RetrievalContext, background: str, goal: str) -> Tuple[str, str]:

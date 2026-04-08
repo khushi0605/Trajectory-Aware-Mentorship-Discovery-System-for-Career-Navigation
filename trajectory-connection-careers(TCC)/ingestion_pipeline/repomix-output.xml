@@ -1,10 +1,10 @@
-This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
 
 <file_summary>
 This section contains a summary of this file.
 
 <purpose>
-This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+This file contains a packed representation of the entire repository's contents.
 It is designed to be easily consumable by AI systems for analysis, code review,
 or other automated processes.
 </purpose>
@@ -32,7 +32,6 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: **/venv/**, **/__pycache__/**, **/data/**, *.sqlite3, *.png, *.jpg
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -43,13 +42,31 @@ The content is organized as follows:
 <directory_structure>
 configs/
   ingestion_sources.yaml
+  llm.yaml
   retrieval.yaml
 docs/
+  agents.md
   ingestion_pipeline.md
-  retrieval_architecture.md
+  llm.md
+  rag.md
+  systemprompts.md
 src/
   agents/
     __init__.py
+    base_agent.py
+    career_reasoning_agent.py
+    experience_analysis_agent.py
+    experience_retrieval_agent.py
+    feedback_agent.py
+    mentor_discovery_agent.py
+    models.py
+    outreach_agent.py
+    profile_understanding_agent.py
+  app/
+    __init__.py
+    graph.py
+    runner.py
+    state.py
   core/
     __init__.py
     exceptions.py
@@ -83,6 +100,14 @@ src/
       github_scraper.py
     __init__.py
     kaggle_ingestor.py
+  llm/
+    __init__.py
+    client.py
+    config_loader.py
+    gemini_client.py
+    models.py
+    prompt_builder.py
+    response_parser.py
   matching/
     experience_role_matcher.py
     profile_job_matcher.py
@@ -104,6 +129,17 @@ src/
     resume_profile_processor.py
     skill_normalizer.py
     unified_profile_builder.py
+  retrieval/
+    config/
+      retriever_config.py
+    connectors/
+      __init__.py
+      chroma_connector.py
+      neo4j_connector.py
+    __init__.py
+    base_retriever.py
+    models.py
+    rag_retriever.py
   storage/
     queries/
       candidate_job_queries.cypher
@@ -116,6 +152,8 @@ src/
   main.py
 tests/
   test_kaggle_integration.py
+  test_llm_smoke.py
+  test_pipeline_e2e.py
   verify_github.py
 .gitignore
 github_verification_torvalds.json
@@ -123,6 +161,7 @@ README.md
 rebuild_graph.py
 requirements.txt
 test_score.py
+verify_retrieval.py
 </directory_structure>
 
 <files>
@@ -145,17 +184,470 @@ sources:
       - "digit-recognizer"
 </file>
 
+<file path="configs/llm.yaml">
+gemini:
+  model: "models/gemini-2.0-flash"
+  api_key: "${GOOGLE_API_KEY}"
+  temperature: 0.0
+  max_output_tokens: 4096
+  timeout_seconds: 30
+
+grounding:
+  enforce_context_only: true
+  max_context_tokens: 6000
+</file>
+
 <file path="configs/retrieval.yaml">
 neo4j:
   uri: "${NEO4J_URI:-bolt://localhost:7687}"
   user: "${NEO4J_USER:-neo4j}"
   password: "${NEO4J_PASSWORD:-password}"
+
 chroma:
   persist_directory: "data/chroma_db"
-  collection_name: "career_experiences"
+  collection_name: "medium_narratives"
+  embedding_model: "all-MiniLM-L6-v2"
+
 retrieval_params:
   top_k_chroma: 5
-  max_path_length_neo4j: 3
+  neo4j_result_limit: 10
+  timeout_seconds: 10
+  eacr_behavioral_limit: 10
+</file>
+
+<file path="docs/agents.md">
+# Agent Architecture
+## `src/agents/` + `src/app/` — Phase 3
+
+---
+
+## Overview
+
+Seven specialised agents orchestrated as a LangGraph `StateGraph`. Each agent
+is a pure function (node) that reads from shared state, calls the LLM or a
+store, and writes structured output back to state. No agent talks to another
+agent directly — communication is only through state.
+
+The graph runs as a single pipeline per user query. Agent 7 (Feedback) creates
+a conditional edge that can loop back into the graph for human-in-the-loop
+refinement.
+
+---
+
+## Separation from Ingestion Layer
+
+This entire phase lives in two new packages only:
+
+```
+src/
+  agents/          ← individual agent node functions (was empty)
+    __init__.py
+    profile_understanding_agent.py
+    career_reasoning_agent.py
+    experience_retrieval_agent.py
+    experience_analysis_agent.py
+    mentor_discovery_agent.py
+    outreach_agent.py
+    feedback_agent.py
+    base_agent.py          ← shared ABC + utilities
+  app/             ← new top-level package
+    __init__.py
+    graph.py               ← StateGraph definition, edge wiring, entrypoint
+    state.py               ← AgentState TypedDict (the shared state schema)
+    runner.py              ← async entrypoint: build graph, stream output
+```
+
+The existing `src/` packages (`ingestion/`, `processing/`, `enrichment/`,
+`storage/`, `pipeline/`) are **read-only** from the agent perspective.
+Agents import from `src/retrieval/` only — never directly from storage drivers.
+
+---
+
+## Shared State (`src/app/state.py`)
+
+LangGraph passes one state object through every node. This is the single
+source of truth for the whole pipeline run.
+
+```python
+from typing import TypedDict, List, Optional
+from src.retrieval.models import RetrievalContext
+from src.agents.models import (
+    UserProfile, CareerPathOptions, ExperienceInsights,
+    MentorRanking, OutreachDraft, FeedbackSignal
+)
+
+class AgentState(TypedDict):
+    # Input
+    raw_user_input: str
+
+    # Agent 1 output
+    user_profile: Optional[UserProfile]
+
+    # Agent 2 output
+    retrieval_context: Optional[RetrievalContext]
+    career_paths: Optional[CareerPathOptions]
+
+    # Agent 3 output  (pure retrieval — no LLM)
+    retrieval_context: Optional[RetrievalContext]
+
+    # Agent 4 output
+    experience_insights: Optional[ExperienceInsights]
+
+    # Agent 5 output
+    mentor_ranking: Optional[MentorRanking]
+
+    # Agent 6 output
+    outreach_drafts: Optional[List[OutreachDraft]]
+
+    # Agent 7 input/output
+    feedback: Optional[FeedbackSignal]
+    feedback_target_agent: Optional[str]   # which agent to re-run
+
+    # Pipeline metadata
+    errors: List[str]
+    completed_agents: List[str]
+```
+
+---
+
+## Graph Topology (`src/app/graph.py`)
+
+```
+START
+  │
+  ▼
+[1] ProfileUnderstandingAgent      extract structured profile from raw text
+  │
+  ▼
+[3] ExperienceRetrievalAgent        fire RAGRetriever — no LLM, pure data fetch
+  │
+  ▼
+[2] CareerReasoningAgent            reason over trajectory_paths → career options
+  │
+  ▼
+[4] ExperienceAnalysisAgent         synthesise behavioral_signals + narratives
+  │
+  ▼
+[5] MentorDiscoveryAgent            rank candidates by reachability + skill match
+  │
+  ▼
+[6] OutreachAgent                   write personalised message per top mentor
+  │
+  ▼
+[7] FeedbackAgent ─── human input ──► conditional edge:
+      │                                  - "approved" → END
+      └──────────────────────────────►  - "refine X"  → re-run agent X
+```
+
+Note: ExperienceRetrieval (3) runs before CareerReasoning (2) because the
+reasoning agent needs the `RetrievalContext` to be grounded. The numbering
+reflects the user-facing identity, not execution order.
+
+---
+
+## Agent 1 — `ProfileUnderstandingAgent`
+
+**File:** `src/agents/profile_understanding_agent.py`
+
+**Role:** Parses the user's free-text input into a `UserProfile` struct.
+This is the only agent that operates without a `RetrievalContext` — it runs
+on raw input only.
+
+**Store queries:** None  
+**LLM call:** Yes — extraction prompt  
+**Input from state:** `raw_user_input`  
+**Output to state:** `user_profile`
+
+```python
+class UserProfile(BaseModel):
+    background: str           # "CS Student", "Junior Backend Engineer"
+    skills: List[str]         # ["Python", "ML basics", "PyTorch"]
+    interest: str             # "computer vision", "distributed systems"
+    goal: str                 # "CV Engineer", "Staff Engineer"
+    confusion: Optional[str]  # "not sure if research or industry"
+    experience_level: Literal["student", "junior", "mid", "senior"]
+```
+
+**Prompt strategy:** Extraction — the system prompt tells Gemini to parse
+the user's text into the above schema and return JSON. Temperature 0.1
+(we want deterministic extraction, not creativity).
+
+---
+
+## Agent 2 — `CareerReasoningAgent`
+
+**File:** `src/agents/career_reasoning_agent.py`
+
+**Role:** Given the `RetrievalContext` (trajectory paths from Neo4j),
+reasons over what career options exist and presents them ranked by how many
+real candidates took each path.
+
+**Store queries:** None (uses pre-fetched `RetrievalContext`)  
+**LLM call:** Yes — analytical prompt grounded on `trajectory_paths`  
+**Input from state:** `user_profile`, `retrieval_context`  
+**Output to state:** `career_paths`
+
+```python
+class CareerPath(BaseModel):
+    path_description: str          # "CS Student → ML Intern → CV Engineer"
+    supporting_candidate_ids: List[str]
+    avg_reachability: float
+    key_decision: str              # the decision that triggered this transition
+    estimated_hops: int
+
+class CareerPathOptions(BaseModel):
+    recommended_paths: List[CareerPath]   # top 3, ordered by evidence strength
+    reasoning: str                         # LLM explanation grounded in context
+    data_gaps: List[str]                   # what the graph didn't have
+```
+
+**Grounding enforcement:** The prompt explicitly lists the `trajectory_paths`
+from context and instructs the model: "Only describe paths that appear in the
+data above. Do not suggest paths not present."
+
+---
+
+## Agent 3 — `ExperienceRetrievalAgent`
+
+**File:** `src/agents/experience_retrieval_agent.py`
+
+**Role:** Pure data fetcher. Calls `RAGRetriever.retrieve()` with the
+structured `UserProfile`. No LLM involved. This is the agent that actually
+hits Neo4j and ChromaDB.
+
+**Store queries:** Yes — via `RAGRetriever` (all 3 queries)  
+**LLM call:** None  
+**Input from state:** `user_profile`  
+**Output to state:** `retrieval_context`
+
+This agent exists as a separate node (not inlined into other agents) because:
+1. It's the most likely to fail or be slow — isolating it means errors are
+   caught and logged cleanly.
+2. Its output (`RetrievalContext`) is shared by agents 2, 4, and 5 — it
+   should run once and be reused, not called redundantly.
+
+---
+
+## Agent 4 — `ExperienceAnalysisAgent`
+
+**File:** `src/agents/experience_analysis_agent.py`
+
+**Role:** Synthesises the `behavioral_signals` (struggles + learning patterns)
+and `narrative_chunks` from the `RetrievalContext` into human-readable
+insights. This is what gives the system depth beyond just listing paths.
+
+**Store queries:** None (uses `RetrievalContext`)  
+**LLM call:** Yes — synthesis prompt  
+**Input from state:** `retrieval_context`, `user_profile`  
+**Output to state:** `experience_insights`
+
+```python
+class ExperienceInsight(BaseModel):
+    theme: str                      # "Transitioning from ML basics to production CV"
+    frequency: int                  # how many candidates faced this
+    resolution_pattern: str         # "Most resolved via project-based learning on GitHub"
+    supporting_evidence: List[str]  # direct quotes from narrative_chunks
+
+class ExperienceInsights(BaseModel):
+    common_struggles: List[ExperienceInsight]
+    common_learning_paths: List[ExperienceInsight]
+    key_skills_to_acquire: List[str]
+    estimated_transition_time: str  # "6–12 months based on N candidates"
+```
+
+**Prompt strategy:** Synthesis — present the behavioral signals and narrative
+chunks verbatim in the prompt, ask Gemini to identify patterns. The model
+is explicitly told to cite `candidate_id` when making claims.
+
+---
+
+## Agent 5 — `MentorDiscoveryAgent`
+
+**File:** `src/agents/mentor_discovery_agent.py`
+
+**Role:** Ranks candidates from the `trajectory_paths` by their fitness as
+mentors. Fitness = reachability score (already computed in Neo4j) × skill
+overlap with the user × path alignment with the user's goal.
+
+**Store queries:** None (uses `RetrievalContext.trajectory_paths`)  
+**LLM call:** Yes — ranking + justification prompt  
+**Input from state:** `retrieval_context`, `user_profile`  
+**Output to state:** `mentor_ranking`
+
+```python
+class MentorMatch(BaseModel):
+    candidate_id: str
+    reachability_score: float
+    skill_overlap: List[str]        # skills user has that mentor also had
+    path_taken: str                 # "CS Student → ML Intern → CV Engineer"
+    why_relevant: str               # LLM-generated justification (grounded)
+    contact_hook: str               # specific experience to reference in outreach
+
+class MentorRanking(BaseModel):
+    top_mentors: List[MentorMatch]  # top 3
+    ranking_rationale: str
+```
+
+**Near-peer constraint:** The system prompt instructs Gemini to prefer
+candidates with `reachability_score >= 0.6` and to explicitly deprioritise
+any candidate whose trajectory is more than 3 hops ahead of the user.
+
+This is the paper's core contribution made agent-level: surfacing reachable
+near-peers, not globally visible experts.
+
+---
+
+## Agent 6 — `OutreachAgent`
+
+**File:** `src/agents/outreach_agent.py`
+
+**Role:** Writes one personalised outreach message per top mentor. Uses the
+mentor's specific experiences (from `behavioral_signals` and `narrative_chunks`)
+to make each message concrete and non-generic.
+
+**Store queries:** None  
+**LLM call:** Yes — generative prompt, one call per mentor (max 3)  
+**Input from state:** `mentor_ranking`, `retrieval_context`, `user_profile`  
+**Output to state:** `outreach_drafts`
+
+```python
+class OutreachDraft(BaseModel):
+    mentor_candidate_id: str
+    subject_line: str
+    message_body: str               # personalised, references specific experiences
+    personalisation_hooks: List[str]  # what specific data was used
+```
+
+**Personalisation constraint:** The system prompt requires the message to
+reference at least one specific struggle or learning pattern from the
+mentor's `behavioral_signals`. Generic messages ("I saw your profile and...") 
+are explicitly forbidden in the prompt.
+
+---
+
+## Agent 7 — `FeedbackAgent` (Human-in-the-loop)
+
+**File:** `src/agents/feedback_agent.py`
+
+**Role:** Receives human feedback after the full pipeline has run. Parses
+the feedback to determine which agent's output should be revised, then
+signals LangGraph's conditional edge to re-run the appropriate node.
+
+**Store queries:** None  
+**LLM call:** Yes — classification prompt (what does the feedback target?)  
+**Input from state:** `feedback` (human-provided string), all previous outputs  
+**Output to state:** `feedback_target_agent`, updated target agent's output
+
+```python
+class FeedbackSignal(BaseModel):
+    raw_feedback: str
+    target_agent: Literal[
+        "career_reasoning", "experience_analysis",
+        "mentor_discovery", "outreach", "end"
+    ]
+    refinement_instruction: str    # what specifically to change
+```
+
+**Conditional edge logic in `graph.py`:**
+```python
+def route_feedback(state: AgentState) -> str:
+    signal = state.get("feedback")
+    if signal is None or signal.target_agent == "end":
+        return END
+    return signal.target_agent   # re-routes to that agent node
+```
+
+The graph supports max 2 feedback loops per session to prevent infinite
+cycles on free-tier API limits.
+
+---
+
+## Shared Agent Base (`src/agents/base_agent.py`)
+
+```python
+class BaseAgent(ABC):
+    def __init__(self, llm_client: GeminiClient, prompt_builder: PromptBuilder):
+        self.llm = llm_client
+        self.prompts = prompt_builder
+
+    @abstractmethod
+    async def run(self, state: AgentState) -> dict:
+        """
+        Each agent implements this. Returns a dict of state keys to update.
+        LangGraph merges the returned dict into AgentState automatically.
+        """
+        ...
+
+    def _log_completion(self, agent_name: str):
+        # appends agent_name to state["completed_agents"]
+        ...
+
+    def _handle_error(self, agent_name: str, error: Exception) -> dict:
+        # appends to state["errors"], returns safe partial state
+        ...
+```
+
+---
+
+## Pydantic Models (`src/agents/models.py`)
+
+All input/output types for agents (listed above) live in one file.
+This is separate from `src/retrieval/models.py` (which owns `RetrievalContext`).
+Import chain is always one direction:
+
+```
+src/agents/models.py          (agent I/O types)
+src/retrieval/models.py       (RetrievalContext types)
+src/llm/models.py             (LLM config types)
+src/core/types.py             (base types — existing, do not modify)
+```
+
+---
+
+## OOAD Principles Applied
+
+| Principle | How |
+|---|---|
+| **Single Responsibility** | Each agent does exactly one thing. Agent 3 only fetches. Agent 6 only writes messages. |
+| **Open/Closed** | New agent = new file + new node in `graph.py`. Existing agents untouched. |
+| **Dependency Inversion** | Agents depend on `BaseAgent`, `GeminiClient`, `PromptBuilder` — not on Gemini SDK or neo4j driver. |
+| **Interface Segregation** | `BaseAgent.run()` is the only method agents implement. No agent is forced to implement methods it doesn't need. |
+| **Separation from ingestion** | Zero imports from `src/ingestion/`, `src/processing/`, `src/enrichment/`, or `src/pipeline/`. |
+
+---
+
+## File Checklist for Gemini to Implement
+
+```
+src/app/
+  __init__.py
+  state.py           ← AgentState TypedDict
+  graph.py           ← StateGraph wiring + conditional feedback edge
+  runner.py          ← async run(user_input: str) entrypoint
+
+src/agents/
+  __init__.py
+  models.py          ← UserProfile, CareerPathOptions, ExperienceInsights,
+                        MentorRanking, OutreachDraft, FeedbackSignal
+  base_agent.py      ← BaseAgent ABC
+  profile_understanding_agent.py
+  career_reasoning_agent.py
+  experience_retrieval_agent.py
+  experience_analysis_agent.py
+  mentor_discovery_agent.py
+  outreach_agent.py
+  feedback_agent.py
+
+src/llm/
+  __init__.py
+  client.py          ← GeminiClient
+  prompt_builder.py  ← PromptBuilder (all 6 agent methods)
+  response_parser.py ← ResponseParser
+  models.py          ← LLMConfig
+
+configs/
+  llm.yaml           ← new file
+```
 </file>
 
 <file path="docs/ingestion_pipeline.md">
@@ -255,112 +747,1561 @@ mentorship_system/
 ```
 </file>
 
-<file path="docs/retrieval_architecture.md">
-# RAG Retriever Architecture
+<file path="docs/llm.md">
+# LLM Integration Architecture
+## `src/llm/` — Phase 3 foundation
 
-## Overview
-The `RAGRetriever` module is responsible for fetching relevant career context from two primary data sources: **ChromaDB** (semantic experiences) and **Neo4j** (graph trajectories). It provides a unified interface for downstream agents to understand both the "what" (narratives) and the "how" (career paths) of a user's professional journey.
+---
 
-## Class Interface: `RAGRetriever`
+## Purpose
 
-### Location: `src/retrieval/rag_retriever.py`
+The LLM layer is the reasoning engine that sits between the retrieval layer and
+the agent graph. It receives a `RetrievalContext` + a structured user query,
+and produces grounded natural language responses and structured outputs.
+
+This is a **thin wrapper** — not a framework. Its job is to format prompts,
+call the Gemini API, parse responses, and enforce the grounding constraint:
+the model must reason over retrieved data, not generate from training memory.
+
+---
+
+## Model Choice: Gemini 2.5 Flash (free tier)
+
+- **API:** Google Generative AI (`google-generativeai` Python SDK)
+- **Model string:** `gemini-2.5-flash-preview-04-17`  
+  *(verify current free-tier model string at https://ai.google.dev/gemini-api/docs/models)*
+- **Why this model for this system:** Fast enough for multi-agent chains,
+  free tier sufficient for dev/research, structured JSON output supported
+  natively via `response_mime_type: "application/json"`
+
+---
+
+## File Structure (new package — separate from ingestion)
+
+```
+src/
+  llm/
+    __init__.py                  ← exports GeminiClient, PromptBuilder
+    client.py                    ← GeminiClient wrapping google-generativeai
+    prompt_builder.py            ← builds system + user prompts per agent
+    response_parser.py           ← parses/validates LLM JSON outputs
+    models.py                    ← Pydantic types for LLM inputs/outputs
+```
+
+Config: `configs/llm.yaml` (new file)
+
+---
+
+## Class Design
+
+### `GeminiClient`
+
+Single point of contact for all LLM calls across all agents. Every agent
+gets one injected instance — they never instantiate their own.
 
 ```python
-class RAGRetriever:
-    def __init__(self, config_path: str = "configs/retrieval.yaml"):
-        """
-        Initializes connectors for Neo4j and ChromaDB using the provided YAML config.
-        """
-        pass
+# src/llm/client.py
+class GeminiClient:
+    def __init__(self, config: LLMConfig): ...
 
-    async def retrieve(self, query_dict: dict) -> dict:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: type[BaseModel] | None = None,
+        temperature: float = 0.3,
+    ) -> str | dict:
         """
-        Fires async retrieval calls to Neo4j and ChromaDB and merges results.
-        
-        Args:
-            query_dict (dict): {
-                "background": str, # Current role/education
-                "skills": List[str],
-                "interest": str,   # Specific interest/niche
-                "goal": str        # Target role
-            }
-        
-        Returns:
-            dict: Merged context (see Schema section below)
+        Single async call to Gemini.
+        If response_schema is provided, requests JSON and validates
+        the response against the schema before returning.
         """
-        pass
+        ...
+
+    async def generate_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: type[BaseModel],
+    ) -> BaseModel:
+        """
+        Convenience wrapper — always returns a validated Pydantic model.
+        Raises LLMParseError if response doesn't match schema.
+        """
+        ...
 ```
 
-## Retrieval Strategies
+### `PromptBuilder`
 
-### 1. ChromaDB Semantic Search
-- **Library**: `langchain_community.vectorstores.Chroma`
-- **Collection**: `career_experiences`
-- **Operation**: Semantic similarity search based on a combined string of `background`, `skills`, and `interest`.
-- **Top-K**: 5 results.
+Builds the exact prompt pair (system + user) for each agent. Each agent
+has its own builder method. Prompts are assembled here, not inside agent files.
 
-### 2. Neo4j Cypher Traversal
-- **Library**: `neo4j` Python driver
-- **Strategy**: Multi-hop path finding between the user's current `background` (start) and their `goal` (target).
-- **Query**:
-```cypher
-MATCH path=(a:Role {name: $start})-[:TRANSITION*1..3]->(b:Role {name: $goal})
-RETURN path 
-ORDER BY length(path) ASC 
-LIMIT 5
+```python
+# src/llm/prompt_builder.py
+class PromptBuilder:
+
+    def for_profile_understanding(self, raw_input: str) -> tuple[str, str]: ...
+    def for_career_reasoning(self, context: RetrievalContext, profile: UserProfile) -> tuple[str, str]: ...
+    def for_experience_analysis(self, context: RetrievalContext, paths: list) -> tuple[str, str]: ...
+    def for_mentor_discovery(self, context: RetrievalContext, profile: UserProfile) -> tuple[str, str]: ...
+    def for_outreach(self, mentor: MentorMatch, user: UserProfile, experiences: list) -> tuple[str, str]: ...
+    def for_feedback_integration(self, feedback: str, previous_output: dict) -> tuple[str, str]: ...
 ```
 
-## Merged Context Schema
-The returned dictionary will follow this strict structure:
+### `ResponseParser`
 
-```json
-{
-  "trajectory_paths": [
-    {
-      "nodes": ["Software Engineer", "Senior Engineer", "Architect"],
-      "length": 2
-    }
-  ],
-  "narrative_experiences": [
-    {
-      "text": "Deeply specialized in systems programming...",
-      "metadata": { "source": "github", "relevance": 0.89 }
-    }
-  ],
-  "metadata": {
-    "neo4j_count": 5,
-    "chroma_count": 5,
-    "latency_ms": 120
-  }
-}
+Handles the cases where Gemini returns malformed JSON, adds markdown fences,
+or truncates. One place to fix parsing — not scattered across agents.
+
+```python
+# src/llm/response_parser.py
+class ResponseParser:
+    @staticmethod
+    def parse_json(raw: str) -> dict: ...
+
+    @staticmethod
+    def validate_against(raw: str, schema: type[BaseModel]) -> BaseModel: ...
 ```
 
-## Error Handling & Fallbacks
+---
 
-| Scenario | Behavior |
-| :--- | :--- |
-| **Neo4j Direct Path Not Found** | Falls back to "Shortest Path" search or broad `MATCH (a:Role {name: $start})` to find adjacent transitions. If still null, returns empty list `[]`. |
-| **ChromaDB No Results** | Returns empty list `[]`. Downstream agents will rely solely on graph data. |
-| **Config Errors** | Raises `FileNotFoundError` or `ValueError` during initialization. |
-| **Async Timeout** | Implements a timeout for `asyncio.gather`. Partially returned results are included, with the failed source marked in metadata. |
+## The Grounding Constraint (critical for paper)
 
-## Configuration (`configs/retrieval.yaml`)
+Every system prompt follows this template pattern. This is non-negotiable —
+it is what separates your system from generic LLM career advice.
+
+```
+You are a career reasoning engine. You reason ONLY over the data provided
+in the context block below. You do not generate career advice from your
+training data. If the context does not contain enough information to answer,
+say so explicitly.
+
+You will be penalised for:
+- Suggesting career paths not present in the context
+- Inventing experiences or stories
+- Recommending people not in the candidate list
+
+Context:
+{retrieval_context_formatted}
+```
+
+This framing is your paper's empirical claim made executable.
+
+---
+
+## Prompt Templates Per Agent
+
+| Agent | Prompt style | Output format |
+|---|---|---|
+| Profile Understanding | Extraction — parse user free text into structured fields | JSON (`UserProfile`) |
+| Career Reasoning | Analytical — reason over trajectory paths, list options | JSON (`CareerPathOptions`) |
+| Experience Analysis | Synthesis — summarise behavioral signals into insights | JSON (`ExperienceInsights`) |
+| Mentor Discovery | Ranking — score and rank candidates by reachability + match | JSON (`MentorRanking`) |
+| Outreach | Generative — write personalised message using mentor's specific experiences | Plain text |
+| Feedback Integration | Reflective — adjust previous outputs based on user correction | JSON (same schema as target agent) |
+
+---
+
+## LLM Config (`configs/llm.yaml`)
+
 ```yaml
-neo4j:
-  uri: ${NEO4J_URI}
-  user: ${NEO4J_USER}
-  password: ${NEO4J_PASSWORD}
-chroma:
-  persist_directory: "data/chroma_db"
-  collection_name: "career_experiences"
-retrieval_params:
-  top_k_chroma: 5
-  max_path_length_neo4j: 3
+gemini:
+  model: "gemini-2.5-flash-preview-04-17"
+  api_key: "${GEMINI_API_KEY}"
+  temperature: 0.3
+  max_output_tokens: 2048
+  timeout_seconds: 30
+
+grounding:
+  enforce_context_only: true
+  max_context_tokens: 6000   # stay within free-tier context window safely
+```
+
+---
+
+## How Agents Use the LLM Layer
+
+Agents never import `google-generativeai` directly. The pattern is always:
+
+```python
+# inside any agent node function
+prompt_builder = PromptBuilder()
+system, user = prompt_builder.for_career_reasoning(context, profile)
+result = await llm_client.generate_structured(system, user, CareerPathOptions)
+```
+
+The `GeminiClient` and `PromptBuilder` instances are created once in the
+graph entrypoint (`src/app/graph.py`) and injected into each agent node
+via LangGraph's state or node config — not instantiated per-call.
+
+---
+
+## Error Handling
+
+| Scenario | Behaviour |
+|---|---|
+| API rate limit (free tier) | Exponential backoff, max 3 retries, then `LLMRateLimitError` |
+| Malformed JSON response | `ResponseParser` strips fences, retries once, then `LLMParseError` |
+| Response fails schema validation | Logs raw response, raises `LLMParseError` with schema diff |
+| Context exceeds token limit | `PromptBuilder` truncates `narrative_chunks` first, then `behavioral_signals` |
+| Network timeout | `asyncio.wait_for` with `timeout_seconds` from config |
+
+---
+
+## New dependencies to add to `requirements.txt`
+
+```
+google-generativeai>=0.8.0
+langgraph>=0.2.0
+langchain-google-genai>=1.0.0
 ```
 </file>
 
-<file path="src/agents/__init__.py">
+<file path="docs/rag.md">
+# RAG Architecture
+## `src/retrieval/` — Phase 2
 
+---
+
+## Purpose
+
+The retrieval layer is the read-only data access boundary between the populated
+stores (Neo4j + ChromaDB) and the agent graph. Nothing outside this package
+touches a database driver directly.
+
+It exposes a single public method — `RAGRetriever.retrieve()` — that fires
+three concurrent async queries, merges their results, and returns a typed
+`RetrievalContext` object that every downstream agent consumes.
+
+---
+
+## What Is Already Populated (do not re-ingest)
+
+### Neo4j (via `rebuild_graph.py` + `GraphExperienceLayer`)
+
+| Node label | Key properties |
+|---|---|
+| `Candidate` | `user_id`, `reachability_score` |
+| `Skill` | `name` |
+| `Job` | `role` |
+| `Decision` | `id`, `text`, `trigger`, `confidence`, `synthetic` |
+| `Struggle` | `id`, `text`, `domain`, `resolved`, `synthetic` |
+| `LearningPattern` | `id`, `text`, `skill_source`, `themes`, `synthetic` |
+| `Domain` | `name` |
+| `ChromaRef` | `chunk_id`, `collection` |
+
+| Relationship | Properties |
+|---|---|
+| `(Candidate)-[:HAS_SKILL]->(Skill)` | `weight` |
+| `(Candidate)-[:CURRENT_ROLE]->(Job)` | — |
+| `(Candidate)-[:MADE_DECISION]->(Decision)` | `confidence`, `inferred_from` |
+| `(Candidate)-[:FACED]->(Struggle)` | `resolved` |
+| `(Candidate)-[:LEARNED_VIA]->(LearningPattern)` | — |
+| `(Decision)-[:TRIGGERED_TRANSITION {from_role, to_role}]->(Job)` | `from_role`, `to_role` |
+| `(Struggle)-[:IN_DOMAIN]->(Domain)` | — |
+| `(LearningPattern)-[:SEEDED_BY]->(ChromaRef)` | — |
+
+### ChromaDB
+
+- **Collection:** `career_experiences` (confirm name in `configs/retrieval.yaml`)
+- **Documents:** Medium article chunks, each with metadata:
+  `source_profile_id`, `role`, `domain`
+- **Persist directory:** `data/chroma_db`
+
+---
+
+## File Structure (new — do not modify existing `src/`)
+
+```
+src/
+  retrieval/
+    __init__.py                  ← exports RAGRetriever
+    base_retriever.py            ← ABC, defines retrieve() contract
+    rag_retriever.py             ← main class, composes connectors
+    models.py                    ← Pydantic output types (RetrievalContext etc.)
+    connectors/
+      __init__.py
+      neo4j_connector.py         ← wraps neo4j driver, all Cypher lives here
+      chroma_connector.py        ← wraps langchain_community Chroma
+    config/
+      __init__.py
+      retriever_config.py        ← frozen dataclass, loaded from retrieval.yaml
+```
+
+Config file stays at existing location: `configs/retrieval.yaml`
+
+---
+
+## Class Hierarchy
+
+```
+BaseRetriever (ABC)               ← src/retrieval/base_retriever.py
+└── RAGRetriever                  ← src/retrieval/rag_retriever.py
+      ├── Neo4jConnector          ← src/retrieval/connectors/neo4j_connector.py
+      └── ChromaConnector         ← src/retrieval/connectors/chroma_connector.py
+```
+
+`RAGRetriever` depends on the connector interfaces, not the drivers directly.
+This satisfies the Dependency Inversion principle already established in
+`src/core/interfaces.py`.
+
+---
+
+## Retrieval Strategies (3 concurrent async calls)
+
+### Query 1 — Neo4j Trajectory Paths
+
+Finds all candidates who made decisions that triggered transitions matching the
+user's start → goal pair. Uses the actual graph relationships from `GraphExperienceLayer`.
+
+```cypher
+-- Primary: decision-driven transition path
+MATCH (c:Candidate)-[:MADE_DECISION]->(d:Decision)
+      -[:TRIGGERED_TRANSITION]->(j:Job)
+WHERE d.trigger CONTAINS $interest
+   OR j.role CONTAINS $goal
+RETURN c.user_id        AS candidate_id,
+       c.reachability_score AS reachability,
+       d.text           AS decision_text,
+       d.trigger        AS trigger,
+       j.role           AS target_role
+ORDER BY c.reachability_score DESC
+LIMIT $limit
+
+-- Fallback (if primary returns 0 rows): role-only match
+MATCH (c:Candidate)-[:CURRENT_ROLE]->(j:Job)
+WHERE j.role CONTAINS $goal
+RETURN c.user_id AS candidate_id,
+       c.reachability_score AS reachability,
+       j.role AS target_role
+ORDER BY c.reachability_score DESC
+LIMIT $limit
+```
+
+### Query 2 — Neo4j EACR Behavioral Context
+
+Pulls struggle + learning pattern signals for candidates heading toward the
+user's target domain. This is what makes LLM responses grounded in real
+behavioral data, not generic advice.
+
+```cypher
+MATCH (c:Candidate)-[:FACED]->(s:Struggle)-[:IN_DOMAIN]->(dom:Domain)
+WHERE dom.name CONTAINS $domain
+RETURN c.user_id    AS candidate_id,
+       s.text       AS struggle_text,
+       s.resolved   AS resolved,
+       dom.name     AS domain
+LIMIT $limit
+
+UNION
+
+MATCH (c:Candidate)-[:LEARNED_VIA]->(lp:LearningPattern)
+WHERE lp.themes CONTAINS $domain
+   OR lp.skill_source CONTAINS $interest
+RETURN c.user_id    AS candidate_id,
+       lp.text      AS struggle_text,
+       true         AS resolved,
+       lp.skill_source AS domain
+LIMIT $limit
+```
+
+### Query 3 — ChromaDB Semantic Search
+
+Semantic similarity search over Medium article chunks using the user's
+background + skills + interest as the query string.
+
+- **k = 5** (configurable via `retrieval_params.top_k_chroma`)
+- Returns: `text`, `metadata.source_profile_id`, `metadata.role`,
+  `metadata.domain`, `relevance_score`
+
+---
+
+## Output Schema (`RetrievalContext`)
+
+This is the **strict contract** between retrieval and agents. Defined as a
+Pydantic model in `src/retrieval/models.py`. Agents must not access the
+raw store results — only this object.
+
+```python
+class TrajectoryPath(BaseModel):
+    candidate_id: str
+    reachability_score: float
+    decision_text: str
+    trigger: str
+    target_role: str
+
+class BehavioralSignal(BaseModel):
+    candidate_id: str
+    text: str
+    resolved: bool
+    domain: str
+    signal_type: Literal["struggle", "learning_pattern"]
+
+class NarrativeChunk(BaseModel):
+    text: str
+    source_profile_id: str
+    role: str
+    domain: str
+    relevance_score: float
+
+class RetrievalMetadata(BaseModel):
+    neo4j_path_count: int
+    neo4j_behavioral_count: int
+    chroma_count: int
+    neo4j_fallback_used: bool
+    failed_sources: List[str]
+    latency_ms: float
+
+class RetrievalContext(BaseModel):
+    trajectory_paths: List[TrajectoryPath]
+    behavioral_signals: List[BehavioralSignal]
+    narrative_chunks: List[NarrativeChunk]
+    metadata: RetrievalMetadata
+```
+
+---
+
+## Error Handling
+
+| Scenario | Behaviour |
+|---|---|
+| Neo4j primary query returns 0 rows | Runs fallback role-only query; sets `neo4j_fallback_used: true` |
+| Neo4j connection failure | Logs error, returns empty lists, adds `"neo4j"` to `failed_sources` |
+| ChromaDB returns 0 results | Returns empty `narrative_chunks: []`; agents use graph data only |
+| ChromaDB connection failure | Logs error, adds `"chroma"` to `failed_sources` |
+| Config missing / env var not set | Raises `ConfigurationError` (from `src/core/exceptions.py`) at init |
+| Any single query exceeds timeout | `asyncio.wait_for` per query; partial results included |
+
+---
+
+## Configuration (`configs/retrieval.yaml`) — update existing file
+
+```yaml
+neo4j:
+  uri: "${NEO4J_URI:-bolt://localhost:7687}"
+  user: "${NEO4J_USER:-neo4j}"
+  password: "${NEO4J_PASSWORD:-password}"
+
+chroma:
+  persist_directory: "data/chroma_db"
+  collection_name: "career_experiences"
+  embedding_model: "all-MiniLM-L6-v2"   # must match what was used at ingest time
+
+retrieval_params:
+  top_k_chroma: 5
+  neo4j_result_limit: 10
+  timeout_seconds: 10
+  eacr_behavioral_limit: 10
+```
+
+---
+
+## OOAD Principles Applied
+
+| Principle | How |
+|---|---|
+| **Single Responsibility** | `RAGRetriever` only retrieves and merges. No ranking, no reasoning. |
+| **Open/Closed** | New store (e.g. Pinecone) → new connector subclass, no changes to `RAGRetriever`. |
+| **Dependency Inversion** | `RAGRetriever` takes connector instances at init — not drivers. |
+| **Interface Segregation** | Connectors expose only what retriever needs. Driver API is fully hidden. |
+| **Liskov Substitution** | Any `BaseRetriever` subclass can replace `RAGRetriever` in agent code. |
+
+---
+
+## What This Module Does NOT Do
+
+- Does not rank or score mentors → `MentorDiscoveryAgent`
+- Does not reason over context → LLM layer
+- Does not write to any store → strictly read-only
+- Does not build prompts → `PromptBuilder` (Phase 4)
+- Does not know about agents → agents import retriever, not the other way around
+</file>
+
+<file path="docs/systemprompts.md">
+# Prompt Architecture
+## `src/llm/prompt_builder.py` — Phase 4
+
+---
+
+## Philosophy
+
+Prompts are the contract between your structured data and the LLM. Every
+prompt in this system follows three rules:
+
+1. **Grounding first** — the system prompt always presents retrieved data
+   before asking the model to reason. The model cannot reference anything
+   not in the context block.
+2. **Schema-out** — every agent prompt that produces structured data
+   specifies the exact JSON schema inline. The model's instruction is always
+   "return ONLY this JSON shape, no preamble, no markdown fences."
+3. **Failure is explicit** — every prompt tells the model what to return
+   when the context doesn't have enough data. This prevents hallucination
+   under sparse retrieval.
+
+---
+
+## System Prompt Template (shared base)
+
+Used by all agents except Outreach (which is generative, not structured).
+
+```
+You are a career reasoning engine for a mentorship discovery system.
+
+RULES (non-negotiable):
+1. You reason ONLY over data in the CONTEXT block below.
+2. You do not suggest career paths, people, or experiences not present in CONTEXT.
+3. If context is insufficient, return the schema with empty arrays and set
+   "data_sufficient": false.
+4. Return ONLY valid JSON matching the schema specified. No preamble, no
+   markdown fences, no explanation outside the JSON.
+5. When making claims about people, always cite their candidate_id.
+
+CONTEXT:
+{context_block}
+```
+
+The `{context_block}` is assembled by `PromptBuilder` from the
+`RetrievalContext` object. It is always formatted as labelled sections
+(see formatting spec below), never as raw JSON dumps.
+
+---
+
+## Context Block Formatting Spec
+
+The context block is human-readable labelled text, not raw JSON. This
+produces better LLM reasoning than dumping a JSON blob.
+
+### Format
+
+```
+=== CAREER TRAJECTORY PATHS ===
+[1] candidate_id: u_0042 | reachability: 0.81
+    decision: "pursued computer vision specialisation"
+    trigger: "internship opportunity"
+    path: CS Student → ML Intern → CV Engineer
+
+[2] candidate_id: u_0117 | reachability: 0.74
+    decision: "completed open-source CV project"
+    trigger: "github portfolio gap"
+    path: CS Student → Research Assistant → CV Researcher
+
+=== BEHAVIORAL SIGNALS ===
+[struggle] u_0042 | domain: computer_vision | resolved: true
+  "Struggled with gap between academic ML and production OpenCV pipelines"
+
+[learning] u_0117 | source: github | themes: computer_vision,pytorch
+  "Built 3 personal CV projects before first interview, focused on reproducibility"
+
+=== NARRATIVE EXPERIENCES ===
+[chunk 1] role: CV Engineer | domain: computer_vision | relevance: 0.91
+  "I started with basic OpenCV tutorials in my third year. The jump to real-time
+   inference was brutal — latency requirements changed everything I thought I knew
+   about model design."
+
+[chunk 2] role: ML Intern | domain: machine_learning | relevance: 0.84
+  "My internship was mostly data cleaning and pipeline work. Not glamorous but
+   it taught me how production systems actually fail."
+```
+
+This format is assembled by `PromptBuilder._format_context(retrieval_context)`.
+
+---
+
+## Agent 1 — Profile Understanding Prompt
+
+**Temperature:** 0.1 (extraction — deterministic)  
+**Output:** JSON → `UserProfile`
+
+### System
+```
+You are a structured data extractor. Parse the user's input into the exact
+JSON schema below. Extract what is explicitly stated. Do not infer or expand.
+
+Return ONLY this JSON:
+{
+  "background": "string — current role or education level",
+  "skills": ["list of explicitly mentioned skills"],
+  "interest": "string — domain or technology area of interest",
+  "goal": "string — target role or outcome",
+  "confusion": "string or null — any expressed uncertainty",
+  "experience_level": "student|junior|mid|senior"
+}
+```
+
+### User
+```
+Parse this career query:
+"{raw_user_input}"
+```
+
+---
+
+## Agent 2 — Career Reasoning Prompt
+
+**Temperature:** 0.3  
+**Output:** JSON → `CareerPathOptions`
+
+### System
+```
+You are a career path analyst. You will receive career trajectory data and a
+user profile. Your task is to describe the career paths supported by the data.
+
+RULES:
+1. Only describe paths present in TRAJECTORY PATHS section of CONTEXT.
+2. For each path, cite the candidate_id(s) that support it.
+3. Order paths by average reachability score (highest first).
+4. If fewer than 2 paths exist in context, set "data_sufficient": false.
+
+Return ONLY this JSON:
+{
+  "recommended_paths": [
+    {
+      "path_description": "string",
+      "supporting_candidate_ids": ["list"],
+      "avg_reachability": float,
+      "key_decision": "string",
+      "estimated_hops": int
+    }
+  ],
+  "reasoning": "string — 2-3 sentences grounded in the data",
+  "data_gaps": ["list of what was missing"],
+  "data_sufficient": true|false
+}
+
+CONTEXT:
+{context_block}
+```
+
+### User
+```
+User profile:
+- Background: {background}
+- Skills: {skills}
+- Interest: {interest}
+- Goal: {goal}
+
+Describe the career paths available based on the context above.
+```
+
+---
+
+## Agent 4 — Experience Analysis Prompt
+
+**Temperature:** 0.3  
+**Output:** JSON → `ExperienceInsights`
+
+### System
+```
+You are an experience analyst. Synthesise the behavioral signals and narrative
+experiences in CONTEXT into actionable insights for someone with the user's
+background trying to reach their goal.
+
+RULES:
+1. Every insight must cite at least one candidate_id or chunk from CONTEXT.
+2. "frequency" = number of distinct candidates exhibiting this pattern in CONTEXT.
+3. "resolution_pattern" must be grounded in the BEHAVIORAL SIGNALS, not invented.
+4. "estimated_transition_time" must be derived from the number of hops in paths,
+   not fabricated. If you cannot estimate it, return "insufficient data".
+
+Return ONLY this JSON:
+{
+  "common_struggles": [
+    {
+      "theme": "string",
+      "frequency": int,
+      "resolution_pattern": "string",
+      "supporting_evidence": ["list of direct quotes or candidate_ids"]
+    }
+  ],
+  "common_learning_paths": [
+    {
+      "theme": "string",
+      "frequency": int,
+      "resolution_pattern": "string",
+      "supporting_evidence": ["list"]
+    }
+  ],
+  "key_skills_to_acquire": ["list"],
+  "estimated_transition_time": "string"
+}
+
+CONTEXT:
+{context_block}
+```
+
+### User
+```
+User background: {background}
+User goal: {goal}
+
+Synthesise the insights from the context above.
+```
+
+---
+
+## Agent 5 — Mentor Discovery Prompt
+
+**Temperature:** 0.2 (ranking — prefer determinism)  
+**Output:** JSON → `MentorRanking`
+
+### System
+```
+You are a mentor matching engine. Rank the candidates in CONTEXT as potential
+mentors for the user described below.
+
+RANKING CRITERIA (in order of priority):
+1. reachability_score >= 0.6 (near-peer constraint — prefer accessible mentors)
+2. Path alignment: how closely their trajectory matches the user's goal
+3. Skill overlap with the user's current skills
+4. Presence of resolved struggles in the user's target domain
+
+RULES:
+1. Only rank candidates present in CONTEXT TRAJECTORY PATHS.
+2. Deprioritise candidates whose path is more than 3 hops ahead of the user.
+3. "contact_hook" must reference a SPECIFIC struggle or learning pattern from
+   CONTEXT, not a generic trait. Example: "their resolved struggle with
+   OpenCV latency in production" not "their experience in computer vision".
+4. Return maximum 3 mentors.
+
+Return ONLY this JSON:
+{
+  "top_mentors": [
+    {
+      "candidate_id": "string",
+      "reachability_score": float,
+      "skill_overlap": ["list"],
+      "path_taken": "string",
+      "why_relevant": "string — 1-2 sentences citing context data",
+      "contact_hook": "string — specific experience to reference in outreach"
+    }
+  ],
+  "ranking_rationale": "string"
+}
+
+CONTEXT:
+{context_block}
+```
+
+### User
+```
+User profile:
+- Background: {background}
+- Skills: {skills}  
+- Goal: {goal}
+
+Rank the best mentor matches.
+```
+
+---
+
+## Agent 6 — Outreach Prompt
+
+**Temperature:** 0.7 (generative — allow natural language variation)  
+**Output:** Plain text (no JSON schema)
+
+### System
+```
+You are a professional outreach writer for a career mentorship platform.
+
+Write a personalised connection request from a {experience_level} in
+{background} to a potential mentor who has reached {mentor_path}.
+
+RULES:
+1. The message MUST reference the specific experience in PERSONALISATION HOOK below.
+2. Maximum 150 words.
+3. Do not use generic openers ("I came across your profile", "I'm reaching out
+   because").
+4. The sender should ask ONE specific question related to the mentor's experience.
+5. Do not mention the AI system or that this message was generated.
+6. Tone: respectful, direct, specific. Not sycophantic.
+
+PERSONALISATION HOOK (use this — do not invent):
+{contact_hook}
+
+Mentor's path: {mentor_path}
+```
+
+### User
+```
+Write the outreach message from:
+  Sender: {background}, interested in {goal}
+  Recipient: candidate {candidate_id}, path: {mentor_path}
+```
+
+---
+
+## Agent 7 — Feedback Integration Prompt
+
+**Temperature:** 0.2  
+**Output:** JSON → `FeedbackSignal`
+
+### System
+```
+You are a feedback routing engine. A user has reviewed the system's output
+and provided feedback. Classify what they want changed.
+
+Return ONLY this JSON:
+{
+  "target_agent": "career_reasoning|experience_analysis|mentor_discovery|outreach|end",
+  "refinement_instruction": "string — specific instruction for that agent"
+}
+
+"end" means the user is satisfied and the session should close.
+```
+
+### User
+```
+Previous output summary:
+{previous_output_summary}
+
+User feedback:
+"{raw_feedback}"
+
+Classify what should be changed.
+```
+
+---
+
+## Token Budget Management
+
+The `PromptBuilder._format_context()` method truncates context in this order
+when approaching the 6000-token limit:
+
+1. Keep all `trajectory_paths` (highest signal-to-noise)
+2. Truncate `narrative_chunks` to top 3 by relevance score
+3. Truncate `behavioral_signals` to top 5 by domain match
+4. If still over budget, truncate `reasoning` strings in paths to 50 chars
+
+Never truncate `candidate_id`, `reachability_score`, or `path_taken` — these
+are the grounding anchors for every downstream agent.
+</file>
+
+<file path="src/agents/__init__.py">
+from .profile_understanding_agent import ProfileUnderstandingAgent
+from .career_reasoning_agent import CareerReasoningAgent
+from .experience_retrieval_agent import ExperienceRetrievalAgent
+from .experience_analysis_agent import ExperienceAnalysisAgent
+from .mentor_discovery_agent import MentorDiscoveryAgent
+from .outreach_agent import OutreachAgent
+from .feedback_agent import FeedbackAgent
+
+__all__ = [
+    "ProfileUnderstandingAgent",
+    "CareerReasoningAgent",
+    "ExperienceRetrievalAgent",
+    "ExperienceAnalysisAgent",
+    "MentorDiscoveryAgent",
+    "OutreachAgent",
+    "FeedbackAgent"
+]
+</file>
+
+<file path="src/agents/base_agent.py">
+import logging
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List, TYPE_CHECKING
+from src.app.state import AgentState
+
+if TYPE_CHECKING:
+    from src.llm.client import GeminiClient
+    from src.llm.prompt_builder import PromptBuilder
+
+logger = logging.getLogger("agents.base")
+
+class BaseAgent(ABC):
+    def __init__(self, llm_client: "GeminiClient", prompt_builder: "PromptBuilder"):
+        self.llm = llm_client
+        self.prompts = prompt_builder
+
+    @abstractmethod
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Abstract method to be implemented by each agent.
+        Returns a dictionary containing the delta to merge into the shared state.
+        """
+        pass
+
+    def _log_completion(self, agent_name: str, state: AgentState) -> Dict[str, Any]:
+        """
+        Helper to track agent completion in state.
+        """
+        completed = list(state.get("completed_agents", []))
+        if agent_name not in completed:
+            completed.append(agent_name)
+        return {"completed_agents": completed}
+
+    def _handle_error(self, agent_name: str, error: Exception, state: AgentState) -> Dict[str, Any]:
+        """
+        Standard error handler for agent nodes.
+        Logs the error and updates the state error list.
+        """
+        logger.error(f"Agent {agent_name} failed: {error}")
+        errors = list(state.get("errors", []))
+        errors.append(f"{agent_name}: {str(error)}")
+        
+        # Return partial state to ensure the key is initialized as None if it failed
+        # Actual child agents should override this to set their specific key to None
+        return {"errors": errors}
+</file>
+
+<file path="src/agents/career_reasoning_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import CareerPathOptions
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.reasoning")
+
+class CareerReasoningAgent(BaseAgent):
+    """
+    Agent 2: Reasons over trajectory_paths from RetrievalContext.
+    Produces CareerPathOptions.
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "career_reasoning"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            profile = state.get("user_profile")
+            context = state.get("retrieval_context")
+            
+            if not profile or not context:
+                raise ValueError("Missing profile or context for career reasoning")
+
+            # Build prompts
+            system, user = self.prompts.for_career_reasoning(context, profile)
+            
+            # Call LLM
+            career_paths = await self.llm.generate_structured(
+                system_prompt=system,
+                user_prompt=user,
+                response_schema=CareerPathOptions,
+                temperature=0.3
+            )
+            
+            update = {"career_paths": career_paths}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["career_paths"] = None
+            return update
+</file>
+
+<file path="src/agents/experience_analysis_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import ExperienceInsights
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.analysis")
+
+class ExperienceAnalysisAgent(BaseAgent):
+    """
+    Agent 4: Synthesizes behavioral_signals and narrative_chunks.
+    Produces ExperienceInsights.
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "experience_analysis"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            profile = state.get("user_profile")
+            context = state.get("retrieval_context")
+            
+            if not profile or not context:
+                raise ValueError("Missing profile or context for experience analysis")
+
+            # Build prompts
+            system, user = self.prompts.for_experience_analysis(
+                context, 
+                profile.background, 
+                profile.goal
+            )
+            
+            # Call LLM
+            insights = await self.llm.generate_structured(
+                system_prompt=system,
+                user_prompt=user,
+                response_schema=ExperienceInsights,
+                temperature=0.3
+            )
+            
+            update = {"experience_insights": insights}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["experience_insights"] = None
+            return update
+</file>
+
+<file path="src/agents/experience_retrieval_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.retrieval.rag_retriever import RAGRetriever
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.retrieval")
+
+class ExperienceRetrievalAgent(BaseAgent):
+    """
+    Agent 3: Pure data fetcher. Calls RAGRetriever directly.
+    Zero LLM calls.
+    """
+    
+    def __init__(self, llm_client, prompt_builder, retriever: RAGRetriever):
+        super().__init__(llm_client, prompt_builder)
+        self.retriever = retriever
+
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "experience_retrieval"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            profile = state.get("user_profile")
+            if not profile:
+                raise ValueError("No user_profile found in state for retrieval")
+
+            # Build query dict for retriever
+            query_dict = {
+                "background": profile.background,
+                "skills": profile.skills,
+                "interest": profile.interest,
+                "goal": profile.goal
+            }
+            
+            # Execute retrieval
+            context = await self.retriever.retrieve(query_dict)
+            
+            update = {"retrieval_context": context}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["retrieval_context"] = None
+            return update
+</file>
+
+<file path="src/agents/feedback_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import FeedbackSignal
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.feedback")
+
+class FeedbackAgent(BaseAgent):
+    """
+    Agent 7: Analyzes human feedback and routes it to the target agent.
+    Produces FeedbackSignal and increments loop count.
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "feedback"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            raw_feedback = state.get("feedback_input") # We'll expect this in state from runner
+            if not raw_feedback:
+                # If no feedback provided yet, we might be at the end of the first run
+                return {}
+
+            # Summarize previous output (simple string for now)
+            summary = "Summary of previous career reasoning, experience analysis, and mentor matches."
+            
+            # Build prompts
+            system, user = self.prompts.for_feedback_integration(summary, raw_feedback)
+            
+            # Call LLM
+            signal = await self.llm.generate_structured(
+                system_prompt=system,
+                user_prompt=user,
+                response_schema=FeedbackSignal,
+                temperature=0.2
+            )
+            
+            current_loops = state.get("feedback_loop_count", 0)
+            
+            update = {
+                "feedback": signal,
+                "feedback_target_agent": signal.target_agent,
+                "feedback_loop_count": current_loops + 1
+            }
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["feedback"] = None
+            update["feedback_target_agent"] = "end"
+            return update
+</file>
+
+<file path="src/agents/mentor_discovery_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import MentorRanking
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.mentor")
+
+class MentorDiscoveryAgent(BaseAgent):
+    """
+    Agent 5: Ranks candidates by fitness as mentors.
+    Produces MentorRanking.
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "mentor_discovery"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            profile = state.get("user_profile")
+            context = state.get("retrieval_context")
+            
+            if not profile or not context:
+                raise ValueError("Missing profile or context for mentor discovery")
+
+            # Build prompts
+            system, user = self.prompts.for_mentor_discovery(context, profile)
+            
+            # Call LLM
+            ranking = await self.llm.generate_structured(
+                system_prompt=system,
+                user_prompt=user,
+                response_schema=MentorRanking,
+                temperature=0.2 # Prefer ranking determinism
+            )
+            
+            update = {"mentor_ranking": ranking}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["mentor_ranking"] = None
+            return update
+</file>
+
+<file path="src/agents/models.py">
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+
+class UserProfile(BaseModel):
+    background: str = Field(description="Current educational or professional background")
+    skills: List[str] = Field(default_factory=list, description="Explicitly mentioned skills")
+    interest: str = Field(description="Core domain or technology area of interest")
+    goal: str = Field(description="Target role or career outcome")
+    confusion: Optional[str] = Field(None, description="Any expressed uncertainty or conflict in career choice")
+    experience_level: Literal["student", "junior", "mid", "senior"] = Field(description="Current seniority level")
+
+class CareerPath(BaseModel):
+    path_description: str = Field(description="Structured sequence of roles (e.g. A -> B -> C)")
+    supporting_candidate_ids: List[str] = Field(default_factory=list, description="IDs of candidates following this path")
+    avg_reachability: float = Field(description="Aggregated reachability score from graph data")
+    key_decision: str = Field(description="The pivotal decision that triggered the target transition")
+    estimated_hops: int = Field(description="Number of role transitions to reach goal")
+
+class CareerPathOptions(BaseModel):
+    recommended_paths: List[CareerPath] = Field(default_factory=list, description="Top 3 career trajectories from data")
+    reasoning: str = Field(default="", description="Analytical explanation of why these paths were surfaced")
+    data_gaps: List[str] = Field(default_factory=list, description="Information missing from the graph for this query")
+    data_sufficient: bool = Field(default=False, description="Whether enough data was found to make recommendations")
+
+class ExperienceInsight(BaseModel):
+    theme: str = Field(default="", description="Core challenge or learning theme identified")
+    frequency: int = Field(default=0, description="Number of candidates exhibiting this pattern")
+    resolution_pattern: str = Field(default="", description="Grounded summary of how the challenge was resolved")
+    supporting_evidence: List[str] = Field(default_factory=list, description="Direct quotes or candidate_ids as evidence")
+
+class ExperienceInsights(BaseModel):
+    common_struggles: List[ExperienceInsight] = Field(default_factory=list, description="Synthesized blockers encountered by peers")
+    common_learning_paths: List[ExperienceInsight] = Field(default_factory=list, description="Synthesized successful learning strategies")
+    key_skills_to_acquire: List[str] = Field(default_factory=list, description="Specific skills mentioned as critical for transition")
+    estimated_transition_time: str = Field(default="unknown", description="Timeframe estimate grounded in evidence")
+
+class MentorMatch(BaseModel):
+    candidate_id: str = Field(description="ID of the potential mentor")
+    reachability_score: float = Field(default=0.0, description="How attainable this mentor is for the user")
+    skill_overlap: List[str] = Field(default_factory=list, description="Intersection of user skills and mentor's prior skills")
+    path_taken: str = Field(default="", description="The mentor's specific trajectory string")
+    why_relevant: str = Field(default="", description="Personalized rationale for the match")
+    contact_hook: str = Field(default="", description="Specific signal to use in outreach message")
+
+class MentorRanking(BaseModel):
+    top_mentors: List[MentorMatch] = Field(default_factory=list, description="Top 3 ranked mentors")
+    ranking_rationale: str = Field(default="", description="High-level reasoning for the overall ranking")
+
+class OutreachDraft(BaseModel):
+    mentor_candidate_id: str = Field(description="Target mentor's ID")
+    subject_line: str = Field(default="", description="Personalized subject line")
+    message_body: str = Field(default="", description="Custom connection request message")
+    personalisation_hooks: List[str] = Field(default_factory=list, description="Data points used to customize the message")
+
+class FeedbackSignal(BaseModel):
+    raw_feedback: str = Field(description="Original user feedback string")
+    target_agent: Literal["career_reasoning", "experience_analysis", "mentor_discovery", "outreach", "end"] = Field(default="end", description="Agent identified for refinement")
+    refinement_instruction: str = Field(default="", description="Specific instruction for the re-run")
+</file>
+
+<file path="src/agents/outreach_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import OutreachDraft
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.outreach")
+
+class OutreachAgent(BaseAgent):
+    """
+    Agent 6: Generates personalized outreach drafts for top mentors.
+    Produces List[OutreachDraft].
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "outreach"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            profile = state.get("user_profile")
+            ranking = state.get("mentor_ranking")
+            
+            if not profile or not ranking or not ranking.top_mentors:
+                logger.warning("No mentors found to generate outreach drafts for.")
+                return self._log_completion(agent_name, state)
+
+            drafts = []
+            
+            # Generate one draft per mentor (max 3 as per ranking)
+            for mentor in ranking.top_mentors:
+                system, user = self.prompts.for_outreach(
+                    contact_hook=mentor.contact_hook,
+                    mentor_path=mentor.path_taken,
+                    background=profile.background,
+                    goal=profile.goal,
+                    experience_level=profile.experience_level,
+                    candidate_id=mentor.candidate_id
+                )
+                
+                # Outreach is plain text generative
+                body = await self.llm.generate(
+                    system_prompt=system,
+                    user_prompt=user,
+                    temperature=0.7 # Allow variation
+                )
+                
+                drafts.append(OutreachDraft(
+                    mentor_candidate_id=mentor.candidate_id,
+                    subject_line=f"Inquiry about your transition to {profile.goal}",
+                    message_body=body,
+                    personalisation_hooks=[mentor.contact_hook]
+                ))
+            
+            update = {"outreach_drafts": drafts}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["outreach_drafts"] = []
+            return update
+</file>
+
+<file path="src/agents/profile_understanding_agent.py">
+import logging
+from typing import Dict, Any
+from src.agents.base_agent import BaseAgent
+from src.agents.models import UserProfile
+from src.app.state import AgentState
+
+logger = logging.getLogger("agents.profile")
+
+class ProfileUnderstandingAgent(BaseAgent):
+    """
+    Agent 1: Extracts structured UserProfile from raw user input.
+    Operates without RAG context.
+    """
+    
+    async def run(self, state: AgentState) -> Dict[str, Any]:
+        agent_name = "profile_understanding"
+        logger.info(f"Running Agent: {agent_name}")
+        
+        try:
+            raw_input = state.get("raw_user_input")
+            if not raw_input:
+                raise ValueError("No raw_user_input found in state")
+
+            # Build prompts
+            system, user = self.prompts.for_profile_understanding(raw_input)
+            
+            # Call LLM for structured output
+            profile = await self.llm.generate_structured(
+                system_prompt=system,
+                user_prompt=user,
+                response_schema=UserProfile,
+                temperature=0.1 # Determinism over creativity
+            )
+            
+            update = {"user_profile": profile}
+            update.update(self._log_completion(agent_name, state))
+            return update
+
+        except Exception as e:
+            update = self._handle_error(agent_name, e, state)
+            update["user_profile"] = None
+            return update
+</file>
+
+<file path="src/app/__init__.py">
+from .runner import run_pipeline
+from .state import AgentState
+
+__all__ = ["run_pipeline", "AgentState"]
+</file>
+
+<file path="src/app/graph.py">
+import logging
+from functools import partial
+from langgraph.graph import StateGraph, START, END
+from src.llm import GeminiClient, PromptBuilder, load_llm_config
+from src.retrieval.rag_retriever import RAGRetriever
+from src.retrieval.config.retriever_config import RetrieverConfig
+from src.agents import (
+    ProfileUnderstandingAgent,
+    CareerReasoningAgent,
+    ExperienceRetrievalAgent,
+    ExperienceAnalysisAgent,
+    MentorDiscoveryAgent,
+    OutreachAgent,
+    FeedbackAgent
+)
+from src.app.state import AgentState
+from dotenv import load_dotenv
+
+logger = logging.getLogger("app.graph")
+
+def route_feedback(state: AgentState) -> str:
+    """
+    Conditional edge logic for human-in-the-loop feedback.
+    Supports max 2 feedback loops.
+    """
+    signal = state.get("feedback")
+    loop_count = state.get("feedback_loop_count", 0)
+    
+    if signal is None or signal.target_agent == "end" or loop_count >= 2:
+        return END
+    
+    # Map target_agent slug to node name
+    return signal.target_agent
+
+def create_app():
+    """
+    Instantiates components and assembles the LangGraph.
+    """
+    load_dotenv()
+    # 1. Initialize shared components
+    llm_config = load_llm_config("configs/llm.yaml")
+    llm_client = GeminiClient(llm_config)
+    prompt_builder = PromptBuilder()
+    
+    # Fix: Use the config loader
+    retriever_config = RetrieverConfig.load("configs/retrieval.yaml")
+    retriever = RAGRetriever(retriever_config)
+
+    # 2. Instantiate Agents
+    agents = {
+        "profile_understanding": ProfileUnderstandingAgent(llm_client, prompt_builder),
+        "experience_retrieval": ExperienceRetrievalAgent(llm_client, prompt_builder, retriever),
+        "career_reasoning": CareerReasoningAgent(llm_client, prompt_builder),
+        "experience_analysis": ExperienceAnalysisAgent(llm_client, prompt_builder),
+        "mentor_discovery": MentorDiscoveryAgent(llm_client, prompt_builder),
+        "outreach": OutreachAgent(llm_client, prompt_builder),
+        "feedback": FeedbackAgent(llm_client, prompt_builder),
+    }
+
+    # 3. Create StateGraph
+    workflow = StateGraph(AgentState)
+
+    # 4. Add Nodes
+    # Using functools.partial to wrap agent.run into a plain async callable as per spec
+    for name, agent in agents.items():
+        workflow.add_node(name, agent.run)
+
+    # 5. Define Edges (Strict Execution Order)
+    # 1 (Profile) -> 3 (Retrieval) -> 2 (Reasoning) -> 4 (Analysis) -> 5 (Mentors) -> 6 (Outreach) -> 7 (Feedback)
+    workflow.add_edge(START, "profile_understanding")
+    workflow.add_edge("profile_understanding", "experience_retrieval")
+    workflow.add_edge("experience_retrieval", "career_reasoning")
+    workflow.add_edge("career_reasoning", "experience_analysis")
+    workflow.add_edge("experience_analysis", "mentor_discovery")
+    workflow.add_edge("mentor_discovery", "outreach")
+    workflow.add_edge("outreach", "feedback")
+
+    # 6. Add Conditional Edges from Feedback node
+    workflow.add_conditional_edges(
+        "feedback",
+        route_feedback,
+        {
+            "career_reasoning": "career_reasoning",
+            "experience_analysis": "experience_analysis",
+            "mentor_discovery": "mentor_discovery",
+            "outreach": "outreach",
+            END: END
+        }
+    )
+
+    # 7. Compile
+    return workflow.compile()
+
+# Singleton-like access if needed, but create_app() is better for tests
+app = create_app()
+</file>
+
+<file path="src/app/runner.py">
+import logging
+import json
+from typing import Dict, Any
+from src.app.graph import app
+from src.app.state import AgentState
+
+logger = logging.getLogger("app.runner")
+
+def print_agent_delta(state: AgentState):
+    """
+    Prints only the most recently completed agent's output.
+    """
+    if not state.get("completed_agents"):
+        return
+        
+    last_agent = state["completed_agents"][-1]
+    print(f"\n--- [AGENT: {last_agent.upper()} COMPLETED] ---")
+    
+    # Mapping agent name to state key
+    mapping = {
+        "profile_understanding": "user_profile",
+        "experience_retrieval": "retrieval_context",
+        "career_reasoning": "career_paths",
+        "experience_analysis": "experience_insights",
+        "mentor_discovery": "mentor_ranking",
+        "outreach": "outreach_drafts",
+        "feedback": "feedback"
+    }
+    
+    key = mapping.get(last_agent)
+    if key and state.get(key):
+        val = state[key]
+        if hasattr(val, "model_dump_json"):
+            print(val.model_dump_json(indent=2))
+        elif isinstance(val, list):
+            # For outreach_drafts
+            print(json.dumps([d.model_dump() if hasattr(d, "model_dump") else d for d in val], indent=2))
+        else:
+            print(val)
+    elif last_agent == "experience_retrieval":
+        ctx = state.get("retrieval_context")
+        if ctx:
+            print(f"Neo4j Paths Found: {len(ctx.trajectory_paths)}")
+            print(f"Behavioral Signals: {len(ctx.behavioral_signals)}")
+            print(f"Narrative Chunks: {len(ctx.narrative_chunks)}")
+
+async def run_pipeline(raw_user_input: str) -> AgentState:
+    """
+    Initializes state and runs the compiled LangGraph.
+    Exposes streaming output for each agent completion.
+    """
+    initial_state = {
+        "raw_user_input": raw_user_input,
+        "completed_agents": [],
+        "errors": [],
+        "feedback_loop_count": 0
+    }
+    
+    print(f"🔮 Starting Pipeline for input: \"{raw_user_input}\"")
+    
+    final_state = initial_state
+    
+    # We use astream to track progress if we want, or just ainvoke.
+    # To satisfy the "pretty-print as it completes" requirement, 
+    # we can use astream or just wrap the graph invocation.
+    
+    async for event in app.astream(initial_state):
+        if not event:
+            continue
+            
+        # LangGraph events often look like {node_name: {updates}}
+        for node_name, updates in event.items():
+            if not updates or not isinstance(updates, dict):
+                continue
+            # Apply updates manually if we want to print delta *after* current agent
+            # However, AgentState in state.py is just a dict, so we can check it.
+            # Actually, LangGraph merges them into the state passed to the loop.
+            # The 'event' itself is the delta from the node.
+            
+            # Since we want to print the *result* of the node that just ran:
+            # We'll update a local tracker
+            for k, v in updates.items():
+                final_state[k] = v
+            
+            # Now we can print based on the completed_agents list update
+            print_agent_delta(final_state)
+            
+    return final_state
+</file>
+
+<file path="src/app/state.py">
+from typing import TypedDict, List, Optional
+from src.retrieval.models import RetrievalContext
+from src.agents.models import (
+    UserProfile, CareerPathOptions, ExperienceInsights,
+    MentorRanking, OutreachDraft, FeedbackSignal
+)
+
+class AgentState(TypedDict):
+    """
+    Shared state for the LangGraph workflow.
+    LangGraph requires a TypedDict for state management.
+    """
+    # Input
+    raw_user_input: str
+
+    # Agent 1 output
+    user_profile: Optional[UserProfile]
+
+    # Agent 3 output (Retriever)
+    retrieval_context: Optional[RetrievalContext]
+
+    # Agent 2 output
+    career_paths: Optional[CareerPathOptions]
+
+    # Agent 4 output
+    experience_insights: Optional[ExperienceInsights]
+
+    # Agent 5 output
+    mentor_ranking: Optional[MentorRanking]
+
+    # Agent 6 output
+    outreach_drafts: Optional[List[OutreachDraft]]
+
+    # Agent 7 input/output
+    feedback: Optional[FeedbackSignal]
+    feedback_target_agent: Optional[str]   # which agent to re-run
+    feedback_loop_count: int
+
+    # Pipeline metadata
+    errors: List[str]
+    completed_agents: List[str]
 </file>
 
 <file path="src/core/__init__.py">
@@ -382,6 +2323,22 @@ class DiscoveryError(IngestionError):
 
 class ConfigurationError(IngestionError):
     """Raised when collector configuration is invalid."""
+    pass
+
+class LLMError(Exception):
+    """Base class for LLM-related errors."""
+    pass
+
+class LLMParseError(LLMError):
+    """Raised when LLM output cannot be parsed or fails validation."""
+    pass
+
+class LLMRateLimitError(LLMError):
+    """Raised when LLM API rate limits are exceeded."""
+    pass
+
+class AgentExecutionError(Exception):
+    """Raised when an agent node fails to execute correctly."""
     pass
 </file>
 
@@ -3174,6 +5131,508 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(limit=args.limit)
+</file>
+
+<file path="src/llm/__init__.py">
+from .client import GeminiClient
+from .prompt_builder import PromptBuilder
+from .config_loader import load_llm_config
+from .models import FullLLMConfig
+
+__all__ = ["GeminiClient", "PromptBuilder", "load_llm_config", "FullLLMConfig"]
+</file>
+
+<file path="src/llm/client.py">
+import os
+import asyncio
+import logging
+from typing import Optional, Any
+from pydantic import BaseModel
+import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
+
+from src.core.exceptions import LLMParseError, LLMRateLimitError
+from .models import FullLLMConfig
+from .response_parser import ResponseParser
+
+logger = logging.getLogger("llm.client")
+
+class GeminiClient:
+    def __init__(self, config: FullLLMConfig):
+        """
+        Initializes the Gemini client using the Generative AI SDK.
+        """
+        self.config = config.gemini
+        genai.configure(api_key=self.config.api_key)
+        self.model = genai.GenerativeModel(self.config.model)
+
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Single async call to Gemini. Returns raw text response.
+        """
+        temp = temperature if temperature is not None else self.config.temperature
+        max_t = max_tokens if max_tokens is not None else self.config.max_output_tokens
+        
+        # Configure generation
+        generation_config = genai.types.GenerationConfig(
+            temperature=temp,
+            max_output_tokens=max_t,
+        )
+
+        try:
+            # We use a combined prompt or chat history. 
+            # SDK-specific: system_instruction is passed at model init or per call in some versions.
+            # For this version of SDK, we often prepend to user prompt or use chat session.
+            # Using model with system_instruction is preferred if supported.
+            model = genai.GenerativeModel(
+                model_name=self.config.model,
+                system_instruction=system_prompt if system_prompt else None
+            )
+            
+            # Use asyncio to make it non-blocking if needed, 
+            # though the SDK's generate_content is synchronous by default.
+            # We wrap it in a thread for real async behavior.
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, 
+                lambda: model.generate_content(
+                    user_prompt,
+                    generation_config=generation_config
+                )
+            )
+            
+            if not response.text:
+                raise LLMParseError("Gemini returned an empty response")
+                
+            return response.text
+
+        except google_exceptions.ResourceExhausted:
+            logger.error("Gemini API rate limit exceeded.")
+            raise LLMRateLimitError("Rate limit exceeded for Gemini API")
+        except Exception as e:
+            logger.error(f"Gemini API call failed: {e}")
+            raise
+
+    async def generate_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: type[BaseModel],
+        temperature: Optional[float] = None,
+    ) -> BaseModel:
+        """
+        Calls Gemini, requests JSON, and validates against the provided Pydantic schema.
+        Retries once on LLMParseError.
+        """
+        import json
+        temp = temperature if temperature is not None else self.config.temperature
+        
+        # Inject schema into system prompt to ensure field naming alignment
+        schema_dict = response_schema.model_json_schema()
+        # Clean up the schema for the prompt
+        if "$defs" in schema_dict: del schema_dict["$defs"] 
+        schema_json = json.dumps(schema_dict, indent=2)
+        
+        full_system = f"{system_prompt}\n\nReturn ONLY a JSON object matching this schema:\n{schema_json}"
+
+        # Update model for JSON response
+        gen_config = {
+            "response_mime_type": "application/json",
+            "temperature": temp,
+            "max_output_tokens": self.config.max_output_tokens
+        }
+        
+        model = genai.GenerativeModel(
+            model_name=self.config.model,
+            system_instruction=full_system,
+            generation_config=gen_config
+        )
+
+        async def _attempt():
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, 
+                lambda: model.generate_content(
+                    user_prompt,
+                    generation_config=gen_config # Redundant but safe
+                )
+            )
+            
+            if not response.text:
+                raise LLMParseError("Gemini returned an empty response")
+                
+            logger.debug(f"Received LLM response (length: {len(response.text)})")
+            return ResponseParser.validate_against(response.text, response_schema)
+
+        try:
+            return await _attempt()
+        except LLMParseError as first_error:
+            logger.warning(f"First LLM attempt failed: {first_error}. Retrying...")
+            try:
+                return await _attempt()
+            except LLMParseError as second_error:
+                logger.error(f"Second LLM attempt failed: {second_error}")
+                raise second_error
+</file>
+
+<file path="src/llm/config_loader.py">
+import os
+import yaml
+from .models import FullLLMConfig
+
+def load_llm_config(path: str = "configs/llm.yaml") -> FullLLMConfig:
+    """
+    Loads LLM configuration from YAML with environment variable substitution.
+    """
+    def expand_env_vars(data):
+        if isinstance(data, dict):
+            return {k: expand_env_vars(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [expand_env_vars(i) for i in data]
+        elif isinstance(data, str):
+            # Regex to find ${VAR} or ${VAR:-default}
+            import re
+            pattern = re.compile(r'\${(\w+)(?::-([^}]*))?}')
+            def replace(match):
+                var_name = match.group(1)
+                default_value = match.group(2)
+                return os.getenv(var_name, default_value if default_value is not None else match.group(0))
+            return pattern.sub(replace, data)
+        return data
+
+    with open(path, "r") as f:
+        config_dict = yaml.safe_load(f)
+    
+    expanded_config = expand_env_vars(config_dict)
+    return FullLLMConfig(**expanded_config)
+</file>
+
+<file path="src/llm/gemini_client.py">
+import os
+import yaml
+import logging
+import google.generativeai as genai
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger("llm_layer")
+
+class GeminiClient:
+    def __init__(self, config_path: str = "configs/llm.yaml"):
+        """
+        Initializes the Gemini client with configuration and API key.
+        """
+        try:
+            with open(config_path, "r") as f:
+                self.config = yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Failed to load LLM config from {config_path}: {e}")
+            raise
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY environment variable not set.")
+
+        genai.configure(api_key=api_key)
+        
+        self.model_name = self.config.get("model_name", "gemini-1.5-flash")
+        self.temperature = self.config.get("temperature", 0.2)
+        self.max_tokens = self.config.get("max_tokens", 1024)
+        
+        self.model = genai.GenerativeModel(
+            model_name=self.model_name,
+            generation_config={
+                "temperature": self.temperature,
+                "max_output_tokens": self.max_tokens,
+                "response_mime_type": "application/json",
+            }
+        )
+
+    def generate_json(self, prompt: str) -> str:
+        """
+        Calls Gemini model and enforces structured JSON output.
+        Returns ONLY the raw JSON string.
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            if not response.text:
+                logger.warning("Gemini returned an empty response.")
+                return "{}"
+            return response.text
+        except Exception as e:
+            logger.error(f"Gemini API call failed: {e}")
+            raise
+</file>
+
+<file path="src/llm/models.py">
+from pydantic import BaseModel
+from typing import Optional
+
+class LLMConfig(BaseModel):
+    model: str
+    api_key: str
+    temperature: float
+    max_output_tokens: int
+    timeout_seconds: int
+
+class GroundingConfig(BaseModel):
+    enforce_context_only: bool
+    max_context_tokens: int
+
+class FullLLMConfig(BaseModel):
+    gemini: LLMConfig
+    grounding: GroundingConfig
+</file>
+
+<file path="src/llm/prompt_builder.py">
+import logging
+from typing import Dict, Any, List, Tuple
+from src.retrieval.models import RetrievalContext
+from src.agents.models import UserProfile, MentorMatch
+
+logger = logging.getLogger("llm.prompt_builder")
+
+# Grounding Constraint Constant
+GROUNDING_BASE = """
+You are a career reasoning engine for a mentorship discovery system.
+
+RULES (non-negotiable):
+1. You reason ONLY over data in the CONTEXT block below.
+2. You do not suggest career paths, people, or experiences not present in CONTEXT.
+3. If context is insufficient, return the schema with empty arrays and set
+   "data_sufficient": false.
+4. Return ONLY valid JSON matching the schema specified. No preamble, no
+   markdown fences, no explanation outside the JSON.
+5. When making claims about people, always cite their candidate_id.
+
+CONTEXT:
+{context_block}
+"""
+
+class PromptBuilder:
+    
+    def _format_context(self, context: RetrievalContext) -> str:
+        """
+        Formats RetrievalContext into the strict labelled human-readable format.
+        Implements token budget truncation logic.
+        """
+        # Truncation logic (order: narratives -> behavioral -> reasoning)
+        # 1. Narratives to top 3
+        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:3]
+        
+        # 2. Behavioral to top 5 (simulating domain match by keeping first 5)
+        behavioral = context.behavioral_signals[:5]
+        
+        # 3. Paths (never truncated by count)
+        paths = context.trajectory_paths
+        
+        # Assembly
+        lines = []
+        
+        lines.append("=== CAREER TRAJECTORY PATHS ===")
+        for i, p in enumerate(paths, 1):
+            # Reasoning truncation logic: if we were over budget (simulated by length check)
+            # For now, let's just stick to the requested format
+            lines.append(f"[{i}] candidate_id: {p.candidate_id} | reachability: {p.reachability_score}")
+            lines.append(f"    decision: \"{p.decision_text}\"")
+            lines.append(f"    trigger: \"{p.trigger}\"")
+            lines.append(f"    path: {p.target_role}") # Simplified path for now as per model
+            
+        lines.append("\n=== BEHAVIORAL SIGNALS ===")
+        for s in behavioral:
+            lines.append(f"[{s.signal_type}] {s.candidate_id} | domain: {s.domain} | resolved: {s.resolved}")
+            lines.append(f"  \"{s.text}\"")
+            
+        lines.append("\n=== NARRATIVE EXPERIENCES ===")
+        for i, n in enumerate(narratives, 1):
+            lines.append(f"[chunk {i}] role: {n.role} | domain: {n.domain} | relevance: {n.relevance_score}")
+            lines.append(f"  \"{n.text}\"")
+            
+        return "\n".join(lines)
+
+    def for_profile_understanding(self, raw_user_input: str) -> Tuple[str, str]:
+        system = """You are a structured data extractor. Parse the user's input into the exact
+JSON schema below. Extract what is explicitly stated. Do not infer or expand.
+
+Return ONLY this JSON:
+{
+  "background": "string — current role or education level",
+  "skills": ["list of explicitly mentioned skills"],
+  "interest": "string — domain or technology area of interest",
+  "goal": "string — target role, outcome, or options being considered (e.g. 'research or industry')",
+  "confusion": "string or null — any expressed uncertainty",
+  "experience_level": "student|junior|mid|senior"
+}"""
+        user = f"Parse this career query:\n\"{raw_user_input}\""
+        return (system, user)
+
+    def for_career_reasoning(self, context: RetrievalContext, profile: UserProfile) -> Tuple[str, str]:
+        context_block = self._format_context(context)
+        system = GROUNDING_BASE.format(context_block=context_block) + """
+You are a career path analyst. You will receive career trajectory data and a
+user profile. Your task is to describe the career paths supported by the data.
+
+RULES:
+1. Only describe paths present in TRAJECTORY PATHS section of CONTEXT.
+2. For each path, cite the candidate_id(s) that support it.
+3. Order paths by average reachability score (highest first).
+4. If fewer than 2 paths exist in context, set "data_sufficient": false.
+
+Return ONLY this JSON schema: CareerPathOptions"""
+        
+        user = f"""User profile:
+- Background: {profile.background}
+- Skills: {', '.join(profile.skills)}
+- Interest: {profile.interest}
+- Goal: {profile.goal}
+
+Describe the career paths available based on the context above."""
+        return (system, user)
+
+    def for_experience_analysis(self, context: RetrievalContext, background: str, goal: str) -> Tuple[str, str]:
+        context_block = self._format_context(context)
+        system = GROUNDING_BASE.format(context_block=context_block) + """
+You are an experience analyst. Synthesise the behavioral signals and narrative
+experiences in CONTEXT into actionable insights for someone with the user's
+background trying to reach their goal.
+
+RULES:
+1. Every insight must cite at least one candidate_id or chunk from CONTEXT.
+2. "frequency" = number of distinct candidates exhibiting this pattern in CONTEXT.
+3. "resolution_pattern" must be grounded in the BEHAVIORAL SIGNALS, not invented.
+4. "estimated_transition_time" must be derived from the number of hops in paths,
+   not fabricated. If you cannot estimate it, return "insufficient data".
+
+Return ONLY this JSON schema: ExperienceInsights"""
+        
+        user = f"""User background: {background}
+User goal: {goal}
+
+Synthesise the insights from the context above."""
+        return (system, user)
+
+    def for_mentor_discovery(self, context: RetrievalContext, profile: UserProfile) -> Tuple[str, str]:
+        context_block = self._format_context(context)
+        system = GROUNDING_BASE.format(context_block=context_block) + """
+You are a mentor matching engine. Rank the candidates in CONTEXT as potential
+mentors for the user described below.
+
+RANKING CRITERIA (in order of priority):
+1. reachability_score >= 0.6 (near-peer constraint)
+2. Path alignment: how closely their trajectory matches the user's goal
+3. Skill overlap with the user's current skills
+4. Presence of resolved struggles in the user's target domain
+
+RULES:
+1. Only rank candidates present in CONTEXT TRAJECTORY PATHS.
+2. Deprioritise candidates whose path is more than 3 hops ahead of the user.
+3. "contact_hook" must reference a SPECIFIC struggle or learning pattern from
+   CONTEXT.
+4. Return maximum 3 mentors.
+
+Return ONLY this JSON schema: MentorRanking"""
+        
+        user = f"""User profile:
+- Background: {profile.background}
+- Skills: {', '.join(profile.skills)}
+- Goal: {profile.goal}
+
+Rank the best mentor matches."""
+        return (system, user)
+
+    def for_outreach(self, contact_hook: str, mentor_path: str, background: str, goal: str, experience_level: str, candidate_id: str) -> Tuple[str, str]:
+        # Outreach is generative, not structured - no GROUNDING_BASE needed per spec
+        system = f"You are a professional outreach writer for a career mentorship platform."
+        system += f"\n\nWrite a personalised connection request from a {experience_level} in {background} to a potential mentor who has reached {mentor_path}."
+        system += """
+RULES:
+1. The message MUST reference the specific experience in PERSONALISATION HOOK below.
+2. Maximum 150 words.
+3. Do not use generic openers.
+4. The sender should ask ONE specific question.
+5. Do not mention the AI system.
+6. Tone: respectful, direct, specific. Not sycophantic.
+"""
+        user = f"""PERSONALISATION HOOK (use this — do not invent):
+{contact_hook}
+
+Mentor's path: {mentor_path}
+
+Write the outreach message from:
+  Sender: {background}, interested in {goal}
+  Recipient: candidate {candidate_id}, path: {mentor_path}"""
+        return (system, user)
+
+    def for_feedback_integration(self, previous_output_summary: str, raw_feedback: str) -> Tuple[str, str]:
+        system = """You are a feedback routing engine. A user has reviewed the system's output
+and provided feedback. Classify what they want changed.
+
+Return ONLY this JSON:
+{
+  "target_agent": "career_reasoning|experience_analysis|mentor_discovery|outreach|end",
+  "refinement_instruction": "string — specific instruction for that agent"
+}
+
+"end" means the user is satisfied and the session should close."""
+        user = f"""Previous output summary:
+{previous_output_summary}
+
+User feedback:
+"{raw_feedback}"
+
+Classify what should be changed."""
+        return (system, user)
+</file>
+
+<file path="src/llm/response_parser.py">
+import json
+import re
+import logging
+from pydantic import BaseModel, ValidationError
+from src.core.exceptions import LLMParseError
+
+logger = logging.getLogger("llm.response_parser")
+
+class ResponseParser:
+    @staticmethod
+    def parse_json(raw: str) -> dict:
+        """
+        Cleans and parses a JSON string from LLM output.
+        Handles markdown fences and stripping whitespace.
+        """
+        if not raw:
+            raise LLMParseError("Received empty response from LLM")
+
+        # Strip markdown fences if present
+        cleaned = re.sub(r'^```json\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE)
+        
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            # Check for truncation (common if max_tokens is low or output is long)
+            logger.error(f"Malformed JSON (first 500 chars): {cleaned[:500]}")
+            if cleaned.count('{') > cleaned.count('}'):
+                logger.error(f"Detected truncated JSON: {cleaned}")
+                raise LLMParseError(f"LLM output appears truncated: {e}")
+            
+            raise LLMParseError(f"Malformed JSON in LLM response: {e}")
+
+    @staticmethod
+    def validate_against(raw: str, schema: type[BaseModel]) -> BaseModel:
+        """
+        Parses JSON and validates it against a Pydantic schema.
+        """
+        data = ResponseParser.parse_json(raw)
+        try:
+            return schema(**data)
+        except ValidationError as e:
+            logger.error(f"Schema validation failed for {schema.__name__}: {e}")
+            raise LLMParseError(f"LLM output does not match schema {schema.__name__}: {e}")
 </file>
 
 <file path="src/matching/experience_role_matcher.py">
@@ -8229,6 +10688,438 @@ if __name__ == "__main__":
     builder.run()
 </file>
 
+<file path="src/retrieval/config/retriever_config.py">
+from __future__ import annotations
+from dataclasses import dataclass
+import os
+import yaml
+from pathlib import Path
+
+@dataclass(frozen=True)
+class Neo4jConfig:
+    uri: str
+    user: str
+    password: str
+
+@dataclass(frozen=True)
+class ChromaConfig:
+    persist_directory: str
+    collection_name: str
+    embedding_model: str
+
+@dataclass(frozen=True)
+class RetrievalParams:
+    top_k_chroma: int
+    neo4j_result_limit: int
+    timeout_seconds: int
+    eacr_behavioral_limit: int
+
+@dataclass(frozen=True)
+class RetrieverConfig:
+    neo4j: Neo4jConfig
+    chroma: ChromaConfig
+    params: RetrievalParams
+
+    @classmethod
+    def load(cls, path: str = "configs/retrieval.yaml") -> RetrieverConfig:
+        config_path = Path(path)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+            
+        def expand_env_vars(data):
+            if isinstance(data, dict):
+                return {k: expand_env_vars(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [expand_env_vars(i) for i in data]
+            elif isinstance(data, str):
+                import re
+                pattern = re.compile(r'\${(\w+)(?::-([^}]*))?}')
+                def replace(match):
+                    var_name = match.group(1)
+                    default_value = match.group(2)
+                    return os.getenv(var_name, default_value if default_value is not None else match.group(0))
+                return pattern.sub(replace, data)
+            return data
+
+        with open(config_path, "r") as f:
+            data = yaml.safe_load(f)
+            
+        data = expand_env_vars(data)
+            
+        return cls(
+            neo4j=Neo4jConfig(**data.get("neo4j", {})),
+            chroma=ChromaConfig(**data.get("chroma", {})),
+            params=RetrievalParams(**data.get("retrieval_params", {}))
+        )
+</file>
+
+<file path="src/retrieval/connectors/__init__.py">
+from .neo4j_connector import Neo4jConnector
+from .chroma_connector import ChromaConnector
+
+__all__ = ["Neo4jConnector", "ChromaConnector"]
+</file>
+
+<file path="src/retrieval/connectors/chroma_connector.py">
+from __future__ import annotations
+import logging
+from typing import List
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from ..models import NarrativeChunk
+from ..config.retriever_config import ChromaConfig
+
+logger = logging.getLogger("chroma_connector")
+
+class ChromaConnector:
+    def __init__(self, config: ChromaConfig):
+        # Using HuggingFaceEmbeddings as specified in the config's embedding_model
+        # We assume the model name matches a HuggingFace model or a path
+        self.embeddings = HuggingFaceEmbeddings(model_name=config.embedding_model)
+        
+        self.vectorstore = Chroma(
+            persist_directory=config.persist_directory,
+            collection_name=config.collection_name,
+            embedding_function=self.embeddings
+        )
+
+    async def search(self, query: str, k: int) -> List[NarrativeChunk]:
+        """
+        Semantic similarity search over the 'career_experiences' collection.
+        Returns a list of NarrativeChunk models.
+        """
+        chunks = []
+        try:
+            # chroma.similarity_search_with_relevance_scores is more precise
+            results = self.vectorstore.similarity_search_with_relevance_scores(query, k=k)
+            
+            for doc, score in results:
+                chunks.append(NarrativeChunk(
+                    text=doc.page_content,
+                    source_profile_id=doc.metadata.get("source_profile_id", "unknown"),
+                    role=doc.metadata.get("role", "unknown"),
+                    domain=doc.metadata.get("domain", "unknown"),
+                    relevance_score=float(score)
+                ))
+        except Exception as e:
+            logger.error(f"Chroma search failed: {e}")
+            raise
+            
+        return chunks
+</file>
+
+<file path="src/retrieval/connectors/neo4j_connector.py">
+from __future__ import annotations
+import logging
+from typing import List, Dict, Any, Tuple
+from neo4j import GraphDatabase
+from ..models import TrajectoryPath, BehavioralSignal
+from ..config.retriever_config import Neo4jConfig
+
+logger = logging.getLogger("neo4j_connector")
+
+class Neo4jConnector:
+    def __init__(self, config: Neo4jConfig):
+        self.driver = GraphDatabase.driver(
+            config.uri, 
+            auth=(config.user, config.password)
+        )
+
+    def close(self):
+        self.driver.close()
+
+    async def get_trajectory_paths(self, interest: str, goal: str, limit: int) -> Tuple[List[TrajectoryPath], bool]:
+        """
+        Executes the trajectory path query with fallback logic.
+        Returns: (List[TrajectoryPath], fallback_used_bool)
+        """
+        fallback_used = False
+        paths = []
+        
+        try:
+            with self.driver.session() as session:
+                # Primary Query: decision-triggered transitions
+                # Using toLower for case-insensitivity
+                primary_query = """
+                MATCH (c:Candidate)-[:MADE_DECISION]->(d:Decision)
+                      -[:TRIGGERED_TRANSITION]->(j:Job)
+                WHERE toLower(d.trigger) CONTAINS toLower($interest)
+                   OR toLower(j.role) CONTAINS toLower($interest)
+                   OR any(term in [toLower(j.role), toLower(d.trigger)] WHERE any(g in $goal_terms WHERE term CONTAINS g))
+                RETURN c.user_id        AS candidate_id,
+                       c.reachability_score AS reachability,
+                       d.text           AS decision_text,
+                       d.trigger        AS trigger,
+                       j.role           AS target_role
+                ORDER BY c.reachability_score DESC
+                LIMIT $limit
+                """
+                # Split goal into terms for better matching (e.g. "research or industry" -> ["research", "industry"])
+                goal_terms = [t.strip().lower() for t in goal.replace(" or ", ",").replace("/", ",").split(",") if t.strip()]
+                if not goal_terms: goal_terms = [goal.lower()]
+
+                result = session.run(primary_query, interest=interest, goal_terms=goal_terms, limit=limit)
+                rows = result.data()
+                
+                if not rows:
+                    fallback_used = True
+                    logger.info("Neo4j primary query returned 0 rows, running fallback role-only match.")
+                    fallback_query = """
+                    MATCH (c:Candidate)-[:CURRENT_ROLE]->(j:Job)
+                    WHERE any(g in $goal_terms WHERE toLower(j.role) CONTAINS g)
+                       OR toLower(j.role) CONTAINS toLower($interest)
+                    RETURN c.user_id AS candidate_id,
+                           c.reachability_score AS reachability,
+                           j.role AS target_role,
+                           "Standard career progression" AS decision_text,
+                           "Automatic role match" AS trigger
+                    ORDER BY c.reachability_score DESC
+                    LIMIT $limit
+                    """
+                    result = session.run(fallback_query, goal_terms=goal_terms, limit=limit)
+                    rows = result.data()
+                
+                for row in rows:
+                    paths.append(TrajectoryPath(
+                        candidate_id=row["candidate_id"],
+                        reachability_score=row["reachability"],
+                        decision_text=row["decision_text"],
+                        trigger=row["trigger"],
+                        target_role=row["target_role"]
+                    ))
+                    
+        except Exception as e:
+            logger.error(f"Neo4j get_trajectory_paths failed: {e}")
+            raise # Let RAGRetriever handle partial failures and failed_sources
+
+        return paths, fallback_used
+
+    async def get_behavioral_signals(self, domain: str, interest: str, limit: int) -> List[BehavioralSignal]:
+        """
+        Executes the behavioral context query combining struggles and learning patterns.
+        """
+        signals = []
+        try:
+            with self.driver.session() as session:
+                query = """
+                MATCH (c:Candidate)-[:FACED]->(s:Struggle)-[:IN_DOMAIN]->(dom:Domain)
+                WHERE toLower(dom.name) CONTAINS toLower($domain)
+                RETURN c.user_id    AS candidate_id,
+                       s.text       AS text,
+                       s.resolved   AS resolved,
+                       dom.name     AS domain,
+                       "struggle"   AS signal_type
+                LIMIT $limit
+
+                UNION
+
+                MATCH (c:Candidate)-[:LEARNED_VIA]->(lp:LearningPattern)
+                WHERE any(theme in lp.themes WHERE toLower(theme) CONTAINS toLower($domain))
+                   OR toLower(lp.skill_source) CONTAINS toLower($interest)
+                RETURN c.user_id    AS candidate_id,
+                       lp.text      AS text,
+                       True         AS resolved,
+                       lp.skill_source AS domain,
+                       "learning_pattern" AS signal_type
+                LIMIT $limit
+                """
+                result = session.run(query, domain=domain, interest=interest, limit=limit)
+                for row in result.data():
+                    signals.append(BehavioralSignal(
+                        candidate_id=row["candidate_id"],
+                        text=row["text"],
+                        resolved=row["resolved"],
+                        domain=row["domain"],
+                        signal_type=row["signal_type"]
+                    ))
+        except Exception as e:
+            logger.error(f"Neo4j get_behavioral_signals failed: {e}")
+            raise
+            
+        return signals
+</file>
+
+<file path="src/retrieval/__init__.py">
+from .rag_retriever import RAGRetriever
+from .models import RetrievalContext, TrajectoryPath, BehavioralSignal, NarrativeChunk
+from .config.retriever_config import RetrieverConfig
+
+__all__ = [
+    "RAGRetriever",
+    "RetrievalContext",
+    "TrajectoryPath",
+    "BehavioralSignal",
+    "NarrativeChunk",
+    "RetrieverConfig"
+]
+</file>
+
+<file path="src/retrieval/base_retriever.py">
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+from .models import RetrievalContext
+
+class BaseRetriever(ABC):
+    """
+    Abstract base class for all retrievers.
+    Defines the contract for the context retrieval operation.
+    """
+    
+    @abstractmethod
+    async def retrieve(self, query_dict: Dict[str, Any]) -> RetrievalContext:
+        """
+        Main retrieval method to be implemented by subclasses.
+        Args:
+            query_dict: Contains 'background', 'skills', 'interest', and 'goal'.
+        Returns:
+            A populated RetrievalContext object.
+        """
+        pass
+</file>
+
+<file path="src/retrieval/models.py">
+from __future__ import annotations
+from pydantic import BaseModel
+from typing import List, Literal
+
+class TrajectoryPath(BaseModel):
+    candidate_id: str
+    reachability_score: float
+    decision_text: str
+    trigger: str
+    target_role: str
+
+class BehavioralSignal(BaseModel):
+    candidate_id: str
+    text: str
+    resolved: bool
+    domain: str
+    signal_type: Literal["struggle", "learning_pattern"]
+
+class NarrativeChunk(BaseModel):
+    text: str
+    source_profile_id: str
+    role: str
+    domain: str
+    relevance_score: float
+
+class RetrievalMetadata(BaseModel):
+    neo4j_path_count: int
+    neo4j_behavioral_count: int
+    chroma_count: int
+    neo4j_fallback_used: bool
+    failed_sources: List[str]
+    latency_ms: float
+
+class RetrievalContext(BaseModel):
+    trajectory_paths: List[TrajectoryPath]
+    behavioral_signals: List[BehavioralSignal]
+    narrative_chunks: List[NarrativeChunk]
+    metadata: RetrievalMetadata
+</file>
+
+<file path="src/retrieval/rag_retriever.py">
+from __future__ import annotations
+import asyncio
+import logging
+import time
+from typing import Dict, Any, List
+from .base_retriever import BaseRetriever
+from .models import RetrievalContext, RetrievalMetadata, TrajectoryPath, BehavioralSignal, NarrativeChunk
+from .connectors.neo4j_connector import Neo4jConnector
+from .connectors.chroma_connector import ChromaConnector
+from .config.retriever_config import RetrieverConfig
+
+logger = logging.getLogger("rag_retriever")
+
+class RAGRetriever(BaseRetriever):
+    def __init__(self, config: RetrieverConfig):
+        self.config = config
+        self.neo4j = Neo4jConnector(config.neo4j)
+        self.chroma = ChromaConnector(config.chroma)
+
+    async def retrieve(self, query_dict: Dict[str, Any]) -> RetrievalContext:
+        """
+        Main retrieval logic: Concurrent fetch from Neo4j and ChromaDB.
+        """
+        start_time = time.perf_counter()
+        
+        background = query_dict.get("background", "")
+        skills = query_dict.get("skills", [])
+        interest = query_dict.get("interest", "")
+        goal = query_dict.get("goal", "")
+        
+        # Derived values for queries
+        skills_str = " ".join(skills)
+        chroma_query = f"{background} {skills_str} {interest}".strip()
+        # Domain inference: fallback to goal if interest is empty
+        domain = interest if interest else goal
+        
+        limit = self.config.params.neo4j_result_limit
+        behavioral_limit = self.config.params.eacr_behavioral_limit
+        k = self.config.params.top_k_chroma
+        timeout = self.config.params.timeout_seconds
+        
+        failed_sources = []
+        fallback_used = False
+        
+        # Async tasks
+        tasks = [
+            self._safe_call(self.neo4j.get_trajectory_paths(interest, goal, limit), "neo4j_paths"),
+            self._safe_call(self.neo4j.get_behavioral_signals(domain, interest, behavioral_limit), "neo4j_signals"),
+            self._safe_call(self.chroma.search(chroma_query, k), "chroma_search")
+        ]
+        
+        try:
+            # Execute with timeout
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error("RAG retrieval timed out.")
+            results = [([], False), [], []] # Empty results on timeout
+            failed_sources.append("overall_timeout")
+        
+        # Unpack results
+        path_res = results[0] if results[0] is not None else ([], False)
+        paths, fallback_used = path_res if isinstance(path_res, tuple) else ([], False)
+        
+        signals = results[1] if results[1] is not None else []
+        chunks = results[2] if results[2] is not None else []
+        
+        if results[0] is None: failed_sources.append("neo4j_paths")
+        if results[1] is None: failed_sources.append("neo4j_signals")
+        if results[2] is None: failed_sources.append("chroma")
+        
+        latency = (time.perf_counter() - start_time) * 1000
+        
+        metadata = RetrievalMetadata(
+            neo4j_path_count=len(paths),
+            neo4j_behavioral_count=len(signals),
+            chroma_count=len(chunks),
+            neo4j_fallback_used=fallback_used,
+            failed_sources=failed_sources,
+            latency_ms=round(latency, 2)
+        )
+        
+        return RetrievalContext(
+            trajectory_paths=paths,
+            behavioral_signals=signals,
+            narrative_chunks=chunks,
+            metadata=metadata
+        )
+
+    async def _safe_call(self, coro, source_name: str):
+        """Helper to catch errors per source and return None instead of crashing gather."""
+        try:
+            return await coro
+        except Exception as e:
+            logger.error(f"Source '{source_name}' failed: {e}")
+            return None
+
+    def close(self):
+        self.neo4j.close()
+</file>
+
 <file path="src/storage/queries/candidate_job_queries.cypher">
 // src/storage/queries/candidate_job_queries.cypher
 // ===============================================
@@ -8746,13 +11637,16 @@ class RawRepo:
 
 <file path="src/main.py">
 import logging
+import argparse
+import asyncio
 from dotenv import load_dotenv
-from src.pipeline.ingestion_orchestrator import run_pipeline
+from src.pipeline.ingestion_orchestrator import run_pipeline as run_ingestion
+from src.app.runner import run_pipeline as run_career_mentorship
 
 # Authenticate and load environment variables
 load_dotenv()
 
-# Configure batch logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(name)s | %(levelname)s | %(message)s'
@@ -8841,6 +11735,135 @@ def test_kaggle_integration():
 
 if __name__ == "__main__":
     test_kaggle_integration()
+</file>
+
+<file path="tests/test_llm_smoke.py">
+import asyncio
+import sys
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.llm import GeminiClient, PromptBuilder, load_llm_config
+from src.agents.models import UserProfile
+
+async def main():
+    load_dotenv()
+    
+    print("🧪 Starting LLM Smoke Test...")
+    
+    # 1. Load Config
+    try:
+        config = load_llm_config("configs/llm.yaml")
+        print("✅ LLMConfig loaded from configs/llm.yaml")
+    except Exception as e:
+        print(f"❌ Failed to load config: {e}")
+        return
+
+    # 2. Instantiate Client and Builder
+    client = GeminiClient(config)
+    builder = PromptBuilder()
+    print("✅ GeminiClient and PromptBuilder instantiated.")
+
+    # 3. Call for_profile_understanding
+    raw_input = "I'm a CS student, know Python and basic ML, interested in computer vision, not sure if research or industry"
+    system, user = builder.for_profile_understanding(raw_input)
+    print(f"\n📝 Generated Prompts for Profile Understanding:")
+    print(f"--- System ---\n{system[:100]}...")
+    print(f"--- User ---\n{user}")
+
+    # 4. Generate Structured Output
+    print("\n🤖 Calling GeminiClient.generate_structured()...")
+    try:
+        profile = await client.generate_structured(system, user, UserProfile)
+        
+        # 5. Assertions
+        assert isinstance(profile, UserProfile), "Result is not a UserProfile object"
+        assert profile.background, "Background field is empty"
+        assert profile.goal, "Goal field should be present (extracted even if uncertain)"
+        
+        print("\n✅ Smoke Test Passed!")
+        print("\n--- Extracted User Profile ---")
+        print(profile.model_dump_json(indent=2))
+        
+    except Exception as e:
+        print(f"\n❌ Smoke Test Failed: {e}")
+        if hasattr(e, '__dict__'):
+            print(e.__dict__)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+</file>
+
+<file path="tests/test_pipeline_e2e.py">
+import asyncio
+import sys
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.app.runner import run_pipeline
+
+async def test_e2e():
+    load_dotenv()
+    
+    # Input from spec
+    user_input = "I'm a CS student, I know Python and some ML basics, I'm interested in computer vision. I don't know if I should go research or industry."
+    
+    print("🚀 Running E2E Pipeline Test...")
+    
+    try:
+        state = await run_pipeline(user_input)
+        
+        print("\n--- [FINAL ASSERTIONS] ---")
+        
+        # 1. User Profile
+        assert state.get("user_profile") is not None, "user_profile is None"
+        assert state["user_profile"].background != "", "background is empty"
+        assert state["user_profile"].goal != "", "goal is empty"
+        print("✅ User Profile Assertion Passed")
+        
+        # 2. Retrieval Context
+        assert state.get("retrieval_context") is not None, "retrieval_context is None"
+        print(f"DEBUG: neo4j_path_count = {state['retrieval_context'].metadata.neo4j_path_count}")
+        assert state["retrieval_context"].metadata.neo4j_path_count > 0, "No Neo4j paths found (Data mismatch?)"
+        print("✅ Retrieval Context Assertion Passed")
+        
+        # 3. Career Paths
+        assert state.get("career_paths") is not None, "career_paths is None"
+        assert len(state["career_paths"].recommended_paths) > 0, "No recommended paths found"
+        print("✅ Career Paths Assertion Passed")
+        
+        # 4. Mentor Ranking
+        assert state.get("mentor_ranking") is not None, "mentor_ranking is None"
+        assert len(state["mentor_ranking"].top_mentors) > 0, "No mentors ranked"
+        print("✅ Mentor Ranking Assertion Passed")
+        
+        # 5. Outreach Drafts
+        assert state.get("outreach_drafts") is not None, "outreach_drafts is None"
+        assert len(state["outreach_drafts"]) > 0, "No outreach drafts generated"
+        print("✅ Outreach Drafts Assertion Passed")
+        
+        # 6. Errors and Completion
+        assert len(state["errors"]) == 0, f"Errors found in state: {state['errors']}"
+        assert len(state["completed_agents"]) >= 6, f"Expected at least 6 agents to complete, got {len(state['completed_agents'])}"
+        print("✅ Pipeline Logic Assertion Passed")
+        
+        print("\n✨ ALL E2E ASSERTIONS PASSED! ✨")
+        
+    except Exception as e:
+        print(f"\n❌ E2E Test Failed: {e}")
+        # Print state if possible for debugging
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(test_e2e())
 </file>
 
 <file path="tests/verify_github.py">
@@ -9218,6 +12241,9 @@ neo4j>=5.14.0
 langchain>=0.1.0
 langchain-community>=0.0.10
 chromadb>=0.4.0
+sentence-transformers>=2.2.0
+google-generativeai>=0.8.0
+langgraph>=0.2.2
 </file>
 
 <file path="test_score.py">
@@ -9240,6 +12266,79 @@ print(f"val3: {val3}")
 print(f"val4: {val4}")
 print(f"val5: {val5}")
 print(f"Total: {total}")
+</file>
+
+<file path="verify_retrieval.py">
+import asyncio
+import os
+import sys
+import json
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from retrieval import RAGRetriever, RetrieverConfig
+
+async def main():
+    load_dotenv()
+    
+    # Load config
+    try:
+        config = RetrieverConfig.load("configs/retrieval.yaml")
+        print("✅ Config loaded successfully.")
+    except Exception as e:
+        print(f"❌ Config loading failed: {e}")
+        return
+
+    # Initialize retriever
+    retriever = RAGRetriever(config)
+    print("✅ Retriever initialized.")
+
+    # Sample query with Machine Learning data
+    query_dict = {
+        "background": "Data Analyst",
+        "skills": ["Python", "PyTorch", "Calculus"],
+        "interest": "machine learning",
+        "goal": "machine_learning_scientist"
+    }
+
+    print(f"\n🔍 Retrieving context for query: {json.dumps(query_dict, indent=2)}")
+    
+    try:
+        context = await retriever.retrieve(query_dict)
+        
+        print("\n--- Retrieval Results ---")
+        print(f"Trajectory Paths found: {len(context.trajectory_paths)}")
+        if context.trajectory_paths:
+            print(f"Sample Path: {context.trajectory_paths[0].decision_text} -> {context.trajectory_paths[0].target_role}")
+            
+        print(f"Behavioral Signals found: {len(context.behavioral_signals)}")
+        if context.behavioral_signals:
+            print(f"Sample Signal: [{context.behavioral_signals[0].signal_type}] {context.behavioral_signals[0].text}")
+            
+        print(f"Narrative Chunks found: {len(context.narrative_chunks)}")
+        if context.narrative_chunks:
+            # Print first 100 chars of the first chunk
+            chunk_text = context.narrative_chunks[0].text[:100].replace('\n', ' ') + "..."
+            print(f"Sample Narrative: {chunk_text}")
+        
+        print("\n--- Metadata ---")
+        print(json.dumps(context.metadata.model_dump(), indent=2))
+        
+        if context.metadata.failed_sources:
+            print(f"\n⚠️ Warning: Some sources failed: {context.metadata.failed_sources}")
+            
+        print("\n✅ Verification complete.")
+        
+    except Exception as e:
+        print(f"❌ Retrieval failed: {e}")
+    finally:
+        retriever.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 </file>
 
 </files>

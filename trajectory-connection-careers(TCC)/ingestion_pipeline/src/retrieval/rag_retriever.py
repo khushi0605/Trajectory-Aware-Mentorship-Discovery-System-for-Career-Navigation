@@ -30,7 +30,8 @@ class RAGRetriever(BaseRetriever):
         
         # Derived values for queries
         skills_str = " ".join(skills)
-        chroma_query = f"{background} {skills_str} {interest}".strip()
+        # NEW — more targeted, uses interest + goal as the semantic anchor:
+        chroma_query = f"{interest} {goal} career transition experience".strip()
         # Domain inference: fallback to goal if interest is empty
         domain = interest if interest else goal
         

@@ -10,11 +10,34 @@ class UserProfile(BaseModel):
     experience_level: Literal["student", "junior", "mid", "senior"] = Field(description="Current seniority level")
 
 class CareerPath(BaseModel):
-    path_description: str = Field(description="Structured sequence of roles (e.g. A -> B -> C)")
-    supporting_candidate_ids: List[str] = Field(default_factory=list, description="IDs of candidates following this path")
-    avg_reachability: float = Field(description="Aggregated reachability score from graph data")
-    key_decision: str = Field(description="The pivotal decision that triggered the target transition")
-    estimated_hops: int = Field(description="Number of role transitions to reach goal")
+    path_description: str = Field(
+        default="unknown path", 
+        description="Structured sequence of roles (e.g. A -> B -> C). Extract from the 'path_description' in context.",
+        alias="description"
+    )
+    supporting_candidate_ids: List[str] = Field(
+        default_factory=list, 
+        description="IDs of candidates following this exact path.",
+        alias="supporting_candidates"
+    )
+    avg_reachability: float = Field(
+        default=0.0, 
+        description="The average of 'avg_reachability' scores from the supporting candidates in context.",
+        alias="reachability"
+    )
+    key_decision: str = Field(
+        default="unknown", 
+        description="The pivotal decision that triggered the transition. Extract from 'key_decision' in context.",
+        alias="decision"
+    )
+    estimated_hops: int = Field(
+        default=0, 
+        description="Number of role transitions to reach goal. Count the steps in path_description.",
+        alias="hops"
+    )
+
+    class Config:
+        populate_by_name = True
 
 class CareerPathOptions(BaseModel):
     recommended_paths: List[CareerPath] = Field(default_factory=list, description="Top 3 career trajectories from data")
@@ -23,9 +46,9 @@ class CareerPathOptions(BaseModel):
     data_sufficient: bool = Field(default=False, description="Whether enough data was found to make recommendations")
 
 class ExperienceInsight(BaseModel):
-    theme: str = Field(default="", description="Core challenge or learning theme identified")
-    frequency: int = Field(default=0, description="Number of candidates exhibiting this pattern")
-    resolution_pattern: str = Field(default="", description="Grounded summary of how the challenge was resolved")
+    theme: str = Field(default="unknown theme", description="Core challenge or learning theme identified")
+    frequency: int = Field(default=1, description="Number of candidates exhibiting this pattern")
+    resolution_pattern: str = Field(default="unknown resolution", description="Grounded summary of how the challenge was resolved")
     supporting_evidence: List[str] = Field(default_factory=list, description="Direct quotes or candidate_ids as evidence")
 
 class ExperienceInsights(BaseModel):
