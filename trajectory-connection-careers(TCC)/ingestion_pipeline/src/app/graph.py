@@ -4,15 +4,17 @@ from langgraph.graph import StateGraph, START, END
 from src.llm import GeminiClient, PromptBuilder, load_llm_config
 from src.retrieval.rag_retriever import RAGRetriever
 from src.retrieval.config.retriever_config import RetrieverConfig
-from src.agents import (
-    ProfileUnderstandingAgent,
-    CareerReasoningAgent,
-    ExperienceRetrievalAgent,
-    ExperienceAnalysisAgent,
-    MentorDiscoveryAgent,
-    OutreachAgent,
-    FeedbackAgent
-)
+# Direct agent module imports — do NOT import from src.agents (package __init__)
+# to avoid circular: state.py → agents.models → agents.__init__ → base_agent → state.py
+from src.agents.profile_understanding_agent import ProfileUnderstandingAgent
+from src.agents.career_reasoning_agent import CareerReasoningAgent
+from src.agents.experience_retrieval_agent import ExperienceRetrievalAgent
+from src.agents.experience_analysis_agent import ExperienceAnalysisAgent
+from src.agents.mentor_discovery_agent import MentorDiscoveryAgent
+from src.agents.outreach_agent import OutreachAgent
+from src.agents.feedback_agent import FeedbackAgent
+from src.agents.multi_agent_debate import MultiAgentDebateAgent
+
 from src.app.state import AgentState
 from dotenv import load_dotenv
 
@@ -51,6 +53,7 @@ def create_app():
         "profile_understanding": ProfileUnderstandingAgent(llm_client, prompt_builder),
         "experience_retrieval": ExperienceRetrievalAgent(llm_client, prompt_builder, retriever),
         "career_reasoning": CareerReasoningAgent(llm_client, prompt_builder),
+        "multi_agent_debate": MultiAgentDebateAgent(llm_client),
         "experience_analysis": ExperienceAnalysisAgent(llm_client, prompt_builder),
         "mentor_discovery": MentorDiscoveryAgent(llm_client, prompt_builder),
         "outreach": OutreachAgent(llm_client, prompt_builder),
@@ -66,11 +69,12 @@ def create_app():
         workflow.add_node(name, agent.run)
 
     # 5. Define Edges (Strict Execution Order)
-    # 1 (Profile) -> 3 (Retrieval) -> 2 (Reasoning) -> 4 (Analysis) -> 5 (Mentors) -> 6 (Outreach) -> 7 (Feedback)
+    # Profile -> Retrieval -> Reasoning -> [Debate] -> Analysis -> Mentors -> Outreach -> Feedback
     workflow.add_edge(START, "profile_understanding")
     workflow.add_edge("profile_understanding", "experience_retrieval")
     workflow.add_edge("experience_retrieval", "career_reasoning")
-    workflow.add_edge("career_reasoning", "experience_analysis")
+    workflow.add_edge("career_reasoning", "multi_agent_debate")   # NEW: debate inserted here
+    workflow.add_edge("multi_agent_debate", "experience_analysis") # was: career_reasoning -> experience_analysis
     workflow.add_edge("experience_analysis", "mentor_discovery")
     workflow.add_edge("mentor_discovery", "outreach")
     workflow.add_edge("outreach", "feedback")

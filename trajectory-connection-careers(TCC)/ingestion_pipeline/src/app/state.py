@@ -39,3 +39,7 @@ class AgentState(TypedDict):
     # Pipeline metadata
     errors: List[str]
     completed_agents: List[str]
+
+    # Debate agent output (inserted between career_reasoning and experience_analysis)
+    debate_result: Optional[dict]
+

@@ -1,10 +1,10 @@
-This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
 
 <file_summary>
 This section contains a summary of this file.
 
 <purpose>
-This file contains a packed representation of the entire repository's contents.
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
 It is designed to be easily consumable by AI systems for analysis, code review,
 or other automated processes.
 </purpose>
@@ -32,6 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: .env, venv, env, node_modules, data, repomix-output.xml, *.log, .git, .DS_Store
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -100,6 +101,8 @@ src/
       github_scraper.py
     __init__.py
     kaggle_ingestor.py
+    resume_merger.py
+    resume_parser.py
   llm/
     __init__.py
     client.py
@@ -160,6 +163,7 @@ github_verification_torvalds.json
 README.md
 rebuild_graph.py
 requirements.txt
+test_model.py
 test_score.py
 verify_retrieval.py
 </directory_structure>
@@ -186,11 +190,11 @@ sources:
 
 <file path="configs/llm.yaml">
 gemini:
-  model: "models/gemini-2.0-flash"
+  model: "models/gemini-flash-latest"
   api_key: "${GOOGLE_API_KEY}"
-  temperature: 0.0
-  max_output_tokens: 4096
-  timeout_seconds: 30
+  temperature: 0.1
+  max_output_tokens: 8192
+  timeout_seconds: 60
 
 grounding:
   enforce_context_only: true
@@ -1907,11 +1911,34 @@ class UserProfile(BaseModel):
     experience_level: Literal["student", "junior", "mid", "senior"] = Field(description="Current seniority level")
 
 class CareerPath(BaseModel):
-    path_description: str = Field(description="Structured sequence of roles (e.g. A -> B -> C)")
-    supporting_candidate_ids: List[str] = Field(default_factory=list, description="IDs of candidates following this path")
-    avg_reachability: float = Field(description="Aggregated reachability score from graph data")
-    key_decision: str = Field(description="The pivotal decision that triggered the target transition")
-    estimated_hops: int = Field(description="Number of role transitions to reach goal")
+    path_description: str = Field(
+        default="unknown path", 
+        description="Structured sequence of roles (e.g. A -> B -> C). Extract from the 'path_description' in context.",
+        alias="description"
+    )
+    supporting_candidate_ids: List[str] = Field(
+        default_factory=list, 
+        description="IDs of candidates following this exact path.",
+        alias="supporting_candidates"
+    )
+    avg_reachability: float = Field(
+        default=0.0, 
+        description="The average of 'avg_reachability' scores from the supporting candidates in context.",
+        alias="reachability"
+    )
+    key_decision: str = Field(
+        default="unknown", 
+        description="The pivotal decision that triggered the transition. Extract from 'key_decision' in context.",
+        alias="decision"
+    )
+    estimated_hops: int = Field(
+        default=0, 
+        description="Number of role transitions to reach goal. Count the steps in path_description.",
+        alias="hops"
+    )
+
+    class Config:
+        populate_by_name = True
 
 class CareerPathOptions(BaseModel):
     recommended_paths: List[CareerPath] = Field(default_factory=list, description="Top 3 career trajectories from data")
@@ -1920,9 +1947,9 @@ class CareerPathOptions(BaseModel):
     data_sufficient: bool = Field(default=False, description="Whether enough data was found to make recommendations")
 
 class ExperienceInsight(BaseModel):
-    theme: str = Field(default="", description="Core challenge or learning theme identified")
-    frequency: int = Field(default=0, description="Number of candidates exhibiting this pattern")
-    resolution_pattern: str = Field(default="", description="Grounded summary of how the challenge was resolved")
+    theme: str = Field(default="unknown theme", description="Core challenge or learning theme identified")
+    frequency: int = Field(default=1, description="Number of candidates exhibiting this pattern")
+    resolution_pattern: str = Field(default="unknown resolution", description="Grounded summary of how the challenge was resolved")
     supporting_evidence: List[str] = Field(default_factory=list, description="Direct quotes or candidate_ids as evidence")
 
 class ExperienceInsights(BaseModel):
@@ -5133,6 +5160,135 @@ if __name__ == "__main__":
     main(limit=args.limit)
 </file>
 
+<file path="src/ingestion/resume_merger.py">
+import logging
+
+logger = logging.getLogger("ingestion.resume_merger")
+
+
+def merge_resume_with_query(resume_text: str, user_query: str) -> str:
+    """
+    Merges parsed resume content with the user's free-text query into a
+    single enriched string that the ProfileUnderstandingAgent can parse.
+
+    The ProfileUnderstandingAgent's existing extraction prompt handles this
+    format without any prompt changes — the RESUME CONTEXT block provides
+    grounded facts while the USER QUERY captures the stated goal.
+
+    Args:
+        resume_text: Cleaned plain text extracted from the resume.
+        user_query: The user's free-text career question or goal statement.
+
+    Returns:
+        A single merged string with labelled sections.
+    """
+    merged = (
+        f"RESUME CONTEXT:\n"
+        f"{resume_text.strip()}\n\n"
+        f"USER QUERY:\n"
+        f"{user_query.strip()}"
+    )
+    logger.info(
+        f"Merged resume ({len(resume_text)} chars) with query ({len(user_query)} chars) "
+        f"into enriched input ({len(merged)} chars)."
+    )
+    return merged
+</file>
+
+<file path="src/ingestion/resume_parser.py">
+import re
+import logging
+
+logger = logging.getLogger("ingestion.resume_parser")
+
+# Common section headers to detect structure
+SECTION_KEYWORDS = [
+    "experience", "education", "skills", "projects", "summary",
+    "work history", "certifications", "awards", "publications",
+    "objective", "profile", "languages", "interests"
+]
+
+def _detect_section_headers(text: str) -> str:
+    """
+    Adds a blank line before detected section headers to preserve structure.
+    """
+    lines = text.split("\n")
+    output = []
+    for line in lines:
+        stripped = line.strip().lower()
+        if any(stripped.startswith(kw) or stripped == kw for kw in SECTION_KEYWORDS):
+            output.append("")  # blank line before section
+            output.append(line.strip())
+        else:
+            output.append(line)
+    return "\n".join(output)
+
+
+def _clean_text(text: str) -> str:
+    """
+    Strips excessive whitespace and blank lines, preserving intentional structure.
+    """
+    # Collapse 3+ consecutive blank lines into one
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Strip leading/trailing whitespace from each line
+    lines = [line.rstrip() for line in text.split("\n")]
+    return "\n".join(lines).strip()
+
+
+def parse_resume(file_path: str) -> str:
+    """
+    Parses a PDF or plain-text resume into structured plain text.
+
+    Args:
+        file_path: Absolute or relative path to the resume file (.pdf or .txt)
+
+    Returns:
+        Cleaned plain text extracted from the resume, with section structure preserved.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file extension is not .pdf or .txt.
+    """
+    import os
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Resume file not found: {file_path}")
+
+    ext = os.path.splitext(file_path)[-1].lower()
+
+    if ext == ".pdf":
+        try:
+            import pdfplumber
+        except ImportError:
+            raise ImportError(
+                "pdfplumber is required for PDF parsing. Install it with: pip install pdfplumber"
+            )
+        logger.info(f"Parsing PDF resume: {file_path}")
+        pages_text = []
+        with pdfplumber.open(file_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    pages_text.append(page_text)
+                else:
+                    logger.debug(f"Page {i+1} returned no extractable text, skipping.")
+        raw_text = "\n".join(pages_text)
+
+    elif ext == ".txt":
+        logger.info(f"Parsing plain-text resume: {file_path}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+
+    else:
+        raise ValueError(f"Unsupported file type '{ext}'. Only .pdf and .txt are supported.")
+
+    structured_text = _detect_section_headers(raw_text)
+    cleaned_text = _clean_text(structured_text)
+
+    logger.info(f"Resume parsed successfully: {len(cleaned_text)} characters extracted.")
+    return cleaned_text
+</file>
+
 <file path="src/llm/__init__.py">
 from .client import GeminiClient
 from .prompt_builder import PromptBuilder
@@ -5185,39 +5341,44 @@ class GeminiClient:
             max_output_tokens=max_t,
         )
 
-        try:
-            # We use a combined prompt or chat history. 
-            # SDK-specific: system_instruction is passed at model init or per call in some versions.
-            # For this version of SDK, we often prepend to user prompt or use chat session.
-            # Using model with system_instruction is preferred if supported.
-            model = genai.GenerativeModel(
-                model_name=self.config.model,
-                system_instruction=system_prompt if system_prompt else None
-            )
-            
-            # Use asyncio to make it non-blocking if needed, 
-            # though the SDK's generate_content is synchronous by default.
-            # We wrap it in a thread for real async behavior.
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: model.generate_content(
-                    user_prompt,
-                    generation_config=generation_config
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # We use a combined prompt or chat history. 
+                # SDK-specific: system_instruction is passed at model init or per call in some versions.
+                # For this version of SDK, we often prepend to user prompt or use chat session.
+                # Using model with system_instruction is preferred if supported.
+                model = genai.GenerativeModel(
+                    model_name=self.config.model,
+                    system_instruction=system_prompt if system_prompt else None
                 )
-            )
-            
-            if not response.text:
-                raise LLMParseError("Gemini returned an empty response")
                 
-            return response.text
+                # Use asyncio to make it non-blocking if needed
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, 
+                    lambda: model.generate_content(
+                        user_prompt,
+                        generation_config=generation_config
+                    )
+                )
+                
+                if not response.text:
+                    raise LLMParseError("Gemini returned an empty response")
+                    
+                return response.text
 
-        except google_exceptions.ResourceExhausted:
-            logger.error("Gemini API rate limit exceeded.")
-            raise LLMRateLimitError("Rate limit exceeded for Gemini API")
-        except Exception as e:
-            logger.error(f"Gemini API call failed: {e}")
-            raise
+            except google_exceptions.ResourceExhausted as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 30 # 30s, 60s
+                    logger.warning(f"Gemini API rate limit exceeded. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error("Gemini API rate limit exceeded. All retries failed.")
+                    raise LLMRateLimitError("Rate limit exceeded for Gemini API after multiple retries")
+            except Exception as e:
+                logger.error(f"Gemini API call failed: {e}")
+                raise
 
     async def generate_structured(
         self,
@@ -5254,31 +5415,54 @@ class GeminiClient:
             generation_config=gen_config
         )
 
-        async def _attempt():
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: model.generate_content(
-                    user_prompt,
-                    generation_config=gen_config # Redundant but safe
-                )
-            )
-            
-            if not response.text:
-                raise LLMParseError("Gemini returned an empty response")
+        async def _attempt_with_retry():
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None, 
+                        lambda: model.generate_content(
+                            user_prompt,
+                            generation_config=gen_config
+                        )
+                    )
+                    
+                    if not response.text:
+                        raise LLMParseError("Gemini returned an empty response")
+                        
+                    logger.debug(f"Received LLM response (length: {len(response.text)})")
+                    
+                    try:
+                        if getattr(response, "candidates", None) and getattr(response.candidates[0], "finish_reason", None):
+                            reason = response.candidates[0].finish_reason
+                            if reason and hasattr(reason, "name") and reason.name != "STOP":
+                                logger.warning(f"LLM Generation did not finish normally! Reason: {reason.name}")
+                    except Exception as log_e:
+                        logger.debug(f"Could not log finish reason: {log_e}")
+                        
+                    return ResponseParser.validate_against(response.text, response_schema)
                 
-            logger.debug(f"Received LLM response (length: {len(response.text)})")
-            return ResponseParser.validate_against(response.text, response_schema)
+                except google_exceptions.ResourceExhausted as e:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 30
+                        logger.warning(f"Gemini API rate limit exceeded. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise LLMRateLimitError("Rate limit exceeded for Gemini API after multiple retries")
+                except LLMParseError as parse_error:
+                    # Inherit retry logic for parse errors if you want, 
+                    # but here we specifically handle ResourceExhausted.
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Parse error on attempt {attempt+1}. Retrying...")
+                        continue
+                    raise parse_error
 
         try:
-            return await _attempt()
-        except LLMParseError as first_error:
-            logger.warning(f"First LLM attempt failed: {first_error}. Retrying...")
-            try:
-                return await _attempt()
-            except LLMParseError as second_error:
-                logger.error(f"Second LLM attempt failed: {second_error}")
-                raise second_error
+            return await _attempt_with_retry()
+        except Exception as e:
+            logger.error(f"Structured LLM attempt failed: {e}")
+            raise e
 </file>
 
 <file path="src/llm/config_loader.py">
@@ -5422,11 +5606,11 @@ class PromptBuilder:
         Implements token budget truncation logic.
         """
         # Truncation logic (order: narratives -> behavioral -> reasoning)
-        # 1. Narratives to top 3
-        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:3]
+        # 1. Narratives to top 10
+        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:10]
         
-        # 2. Behavioral to top 5 (simulating domain match by keeping first 5)
-        behavioral = context.behavioral_signals[:5]
+        # 2. Behavioral to top 20
+        behavioral = context.behavioral_signals[:20]
         
         # 3. Paths (never truncated by count)
         paths = context.trajectory_paths
@@ -5438,10 +5622,10 @@ class PromptBuilder:
         for i, p in enumerate(paths, 1):
             # Reasoning truncation logic: if we were over budget (simulated by length check)
             # For now, let's just stick to the requested format
-            lines.append(f"[{i}] candidate_id: {p.candidate_id} | reachability: {p.reachability_score}")
-            lines.append(f"    decision: \"{p.decision_text}\"")
+            lines.append(f"[{i}] candidate_id: {p.candidate_id} | avg_reachability: {p.reachability_score}")
+            lines.append(f"    key_decision: \"{p.decision_text}\"")
             lines.append(f"    trigger: \"{p.trigger}\"")
-            lines.append(f"    path: {p.target_role}") # Simplified path for now as per model
+            lines.append(f"    path_description: {p.target_role}") # Simplified path for now as per model
             
         lines.append("\n=== BEHAVIORAL SIGNALS ===")
         for s in behavioral:
@@ -5456,15 +5640,28 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def for_profile_understanding(self, raw_user_input: str) -> Tuple[str, str]:
-        system = """You are a structured data extractor. Parse the user's input into the exact
-JSON schema below. Extract what is explicitly stated. Do not infer or expand.
+        system = """You are a structured data extractor. Parse the user's input into the exact JSON schema below.
+
+CRITICAL RULE FOR "goal" FIELD: You MUST map the user's intent to ONE normalized role slug from this list:
+ml_engineer, data_scientist, data_engineer, software_engineer, research_scientist,
+frontend_developer, backend_developer, devops_engineer, cloud_engineer,
+computer_vision_engineer, nlp_engineer, ai_engineer, fullstack_developer,
+ios_mobile_app_engineer, android_developer, product_manager, security_engineer
+
+If the user says "not sure" or "help me connect", infer the closest role from their interest.
+If they mention multiple options (e.g. "healthcare tech or big data"), pick the most specific one.
+NEVER put a full sentence in "goal". Only a role slug like "ml_engineer".
+
+RESUME HANDLING: If a RESUME CONTEXT section is present in the input, extract skills,
+background, and experience level from it. Prioritise explicit facts from the resume
+over inferred facts from the query alone. The USER QUERY contains the stated goal.
 
 Return ONLY this JSON:
 {
   "background": "string — current role or education level",
   "skills": ["list of explicitly mentioned skills"],
-  "interest": "string — domain or technology area of interest",
-  "goal": "string — target role, outcome, or options being considered (e.g. 'research or industry')",
+  "interest": "string — primary domain or technology area (e.g. 'machine learning', 'computer vision')",
+  "goal": "string — ONE normalized role slug from the list above",
   "confusion": "string or null — any expressed uncertainty",
   "experience_level": "student|junior|mid|senior"
 }"""
@@ -5479,9 +5676,16 @@ user profile. Your task is to describe the career paths supported by the data.
 
 RULES:
 1. Only describe paths present in TRAJECTORY PATHS section of CONTEXT.
-2. For each path, cite the candidate_id(s) that support it.
-3. Order paths by average reachability score (highest first).
+2. For each path, cite the candidate_id(s) that support it in supporting_candidate_ids.
+3. Order paths by avg_reachability score (highest first).
 4. If fewer than 2 paths exist in context, set "data_sufficient": false.
+
+FIELD EXTRACTION GUIDE (non-negotiable):
+- "avg_reachability": Use the value after "avg_reachability:" in the CONTEXT for each candidate. Average it across supporting candidates.
+- "key_decision": Use the text after "key_decision:" in the CONTEXT. Never set this to "unknown" if the key_decision field is present in CONTEXT.
+- "path_description": Summarise the role transition shown in path_description field of CONTEXT.
+- "estimated_hops": Count the number of "->" separators in the path_description, then add 1. If the path has 2 roles, hops = 1. If you cannot determine this, use 1 as the default.
+- "supporting_candidate_ids": List the candidate_id values of ALL candidates whose avg_reachability you averaged.
 
 Return ONLY this JSON schema: CareerPathOptions"""
         
@@ -5492,6 +5696,7 @@ Return ONLY this JSON schema: CareerPathOptions"""
 - Goal: {profile.goal}
 
 Describe the career paths available based on the context above."""
+
         return (system, user)
 
     def for_experience_analysis(self, context: RetrievalContext, background: str, goal: str) -> Tuple[str, str]:
@@ -10818,10 +11023,49 @@ from ..config.retriever_config import Neo4jConfig
 
 logger = logging.getLogger("neo4j_connector")
 
+# Maps user interest/goal terms to your actual normalized role slugs in the graph
+INTEREST_TO_ROLES = {
+    "machine learning":    ["ml_engineer", "data_scientist", "research_scientist", "ai_engineer"],
+    "big data":            ["data_engineer", "data_scientist", "big_data_engineer", "data_analyst"],
+    "data science":        ["data_scientist", "data_analyst", "data_engineer"],
+    "computer vision":     ["ml_engineer", "computer_vision_engineer", "research_scientist"],
+    "generative ai":       ["ml_engineer", "ai_engineer", "research_scientist", "data_scientist"],
+    "software engineering":["software_engineer", "backend_developer", "fullstack_developer"],
+    "web development":     ["frontend_developer", "fullstack_developer", "javascript_developer"],
+    "cloud":               ["cloud_engineer", "devops_engineer", "cloud_migration_specialist"],
+    "devops":              ["devops_engineer", "system_engineer", "cloud_automation_engineer"],
+    "healthcare tech":     ["data_scientist", "ml_engineer", "research_scientist"],
+    "mobile":              ["ios_mobile_app_engineer", "android_developer", "mobile_developer"],
+    "backend":             ["backend_developer", "software_engineer", "system_engineer"],
+    "python":              ["data_scientist", "ml_engineer", "backend_developer", "software_engineer"],
+    "javascript":          ["javascript_developer", "frontend_developer", "fullstack_developer"],
+}
+
+def _resolve_roles(interest: str, goal: str) -> List[str]:
+    """Map free-text interest/goal to actual role slugs in the graph."""
+    roles = set()
+    combined = (interest + " " + goal).lower()
+    
+    for keyword, role_list in INTEREST_TO_ROLES.items():
+        if keyword in combined:
+            roles.update(role_list)
+    
+    # Also try goal directly as a slug (if ProfileUnderstanding returned a clean role)
+    clean_goal = goal.lower().replace(" ", "_").replace("-", "_")
+    roles.add(clean_goal)
+    
+    # Fallback: any token from interest that might be a partial role match
+    for token in interest.lower().split():
+        if len(token) > 4:  # skip short words
+            roles.add(token)
+    
+    return list(roles) if roles else ["data_scientist", "software_engineer", "ml_engineer"]
+
+
 class Neo4jConnector:
     def __init__(self, config: Neo4jConfig):
         self.driver = GraphDatabase.driver(
-            config.uri, 
+            config.uri,
             auth=(config.user, config.password)
         )
 
@@ -10829,113 +11073,135 @@ class Neo4jConnector:
         self.driver.close()
 
     async def get_trajectory_paths(self, interest: str, goal: str, limit: int) -> Tuple[List[TrajectoryPath], bool]:
-        """
-        Executes the trajectory path query with fallback logic.
-        Returns: (List[TrajectoryPath], fallback_used_bool)
-        """
         fallback_used = False
         paths = []
-        
+
+        role_terms = _resolve_roles(interest, goal)
+        logger.info(f"Resolved role terms for interest='{interest}' goal='{goal}': {role_terms}")
+
         try:
             with self.driver.session() as session:
-                # Primary Query: decision-triggered transitions
-                # Using toLower for case-insensitivity
+                # Primary: match via MADE_DECISION → TRIGGERED_TRANSITION → Job role
                 primary_query = """
                 MATCH (c:Candidate)-[:MADE_DECISION]->(d:Decision)
                       -[:TRIGGERED_TRANSITION]->(j:Job)
-                WHERE toLower(d.trigger) CONTAINS toLower($interest)
-                   OR toLower(j.role) CONTAINS toLower($interest)
-                   OR any(term in [toLower(j.role), toLower(d.trigger)] WHERE any(g in $goal_terms WHERE term CONTAINS g))
-                RETURN c.user_id        AS candidate_id,
+                WHERE any(term IN $role_terms WHERE toLower(j.role) CONTAINS term)
+                RETURN c.user_id            AS candidate_id,
                        c.reachability_score AS reachability,
-                       d.text           AS decision_text,
-                       d.trigger        AS trigger,
-                       j.role           AS target_role
+                       d.text               AS decision_text,
+                       d.trigger            AS trigger,
+                       j.role               AS target_role
                 ORDER BY c.reachability_score DESC
                 LIMIT $limit
                 """
-                # Split goal into terms for better matching (e.g. "research or industry" -> ["research", "industry"])
-                goal_terms = [t.strip().lower() for t in goal.replace(" or ", ",").replace("/", ",").split(",") if t.strip()]
-                if not goal_terms: goal_terms = [goal.lower()]
-
-                result = session.run(primary_query, interest=interest, goal_terms=goal_terms, limit=limit)
+                result = session.run(primary_query, role_terms=role_terms, limit=limit)
                 rows = result.data()
-                
+
                 if not rows:
                     fallback_used = True
-                    logger.info("Neo4j primary query returned 0 rows, running fallback role-only match.")
+                    logger.info("Primary query returned 0 rows, trying CURRENT_ROLE fallback.")
                     fallback_query = """
                     MATCH (c:Candidate)-[:CURRENT_ROLE]->(j:Job)
-                    WHERE any(g in $goal_terms WHERE toLower(j.role) CONTAINS g)
-                       OR toLower(j.role) CONTAINS toLower($interest)
-                    RETURN c.user_id AS candidate_id,
+                    WHERE any(term IN $role_terms WHERE toLower(j.role) CONTAINS term)
+                    RETURN c.user_id            AS candidate_id,
                            c.reachability_score AS reachability,
-                           j.role AS target_role,
-                           "Standard career progression" AS decision_text,
-                           "Automatic role match" AS trigger
+                           j.role               AS target_role,
+                           "Current role match"  AS decision_text,
+                           "Role similarity"     AS trigger
                     ORDER BY c.reachability_score DESC
                     LIMIT $limit
                     """
-                    result = session.run(fallback_query, goal_terms=goal_terms, limit=limit)
+                    result = session.run(fallback_query, role_terms=role_terms, limit=limit)
                     rows = result.data()
-                
+
+                if not rows:
+                    fallback_used = True
+                    logger.info("Both queries returned 0 rows, using broad skill-based fallback.")
+                    # Last resort: find candidates with relevant skills
+                    skill_terms = [t for t in interest.lower().split() if len(t) > 3]
+                    broad_query = """
+                    MATCH (c:Candidate)-[:HAS_SKILL]->(s:Skill)
+                    WHERE any(term IN $skill_terms WHERE toLower(s.name) CONTAINS term)
+                    WITH c, collect(s.name) AS matched_skills
+                    OPTIONAL MATCH (c)-[:CURRENT_ROLE]->(j:Job)
+                    RETURN c.user_id            AS candidate_id,
+                           c.reachability_score AS reachability,
+                           coalesce(j.role, "software_engineer") AS target_role,
+                           "Skill-based match"   AS decision_text,
+                           head(matched_skills)  AS trigger
+                    ORDER BY c.reachability_score DESC
+                    LIMIT $limit
+                    """
+                    result = session.run(broad_query, skill_terms=skill_terms, limit=limit)
+                    rows = result.data()
+
                 for row in rows:
                     paths.append(TrajectoryPath(
                         candidate_id=row["candidate_id"],
-                        reachability_score=row["reachability"],
-                        decision_text=row["decision_text"],
-                        trigger=row["trigger"],
-                        target_role=row["target_role"]
+                        reachability_score=float(row["reachability"] or 0.0),
+                        decision_text=row["decision_text"] or "",
+                        trigger=row["trigger"] or "",
+                        target_role=row["target_role"] or ""
                     ))
-                    
+
         except Exception as e:
             logger.error(f"Neo4j get_trajectory_paths failed: {e}")
-            raise # Let RAGRetriever handle partial failures and failed_sources
+            raise
 
         return paths, fallback_used
 
     async def get_behavioral_signals(self, domain: str, interest: str, limit: int) -> List[BehavioralSignal]:
-        """
-        Executes the behavioral context query combining struggles and learning patterns.
-        """
         signals = []
+        skill_terms = [t for t in (domain + " " + interest).lower().split() 
+                       if len(t) > 3]
+        
         try:
             with self.driver.session() as session:
                 query = """
-                MATCH (c:Candidate)-[:FACED]->(s:Struggle)-[:IN_DOMAIN]->(dom:Domain)
-                WHERE toLower(dom.name) CONTAINS toLower($domain)
+                // Struggles
+                MATCH (c:Candidate)-[:FACED]->(s:Struggle)
+                OPTIONAL MATCH (s)-[:IN_DOMAIN]->(dom:Domain)
+                WHERE any(term IN $skill_terms 
+                          WHERE toLower(s.text) CONTAINS term
+                             OR (dom IS NOT NULL AND toLower(dom.name) CONTAINS term))
                 RETURN c.user_id    AS candidate_id,
                        s.text       AS text,
                        s.resolved   AS resolved,
-                       dom.name     AS domain,
+                       coalesce(dom.name, $domain) AS domain,
                        "struggle"   AS signal_type
                 LIMIT $limit
 
                 UNION
 
+                // Learning patterns
                 MATCH (c:Candidate)-[:LEARNED_VIA]->(lp:LearningPattern)
-                WHERE any(theme in lp.themes WHERE toLower(theme) CONTAINS toLower($domain))
-                   OR toLower(lp.skill_source) CONTAINS toLower($interest)
-                RETURN c.user_id    AS candidate_id,
-                       lp.text      AS text,
-                       True         AS resolved,
-                       lp.skill_source AS domain,
+                WHERE any(term IN $skill_terms 
+                          WHERE toLower(lp.text) CONTAINS term
+                             OR any(theme IN lp.themes WHERE toLower(theme) CONTAINS term))
+                RETURN c.user_id        AS candidate_id,
+                       lp.text          AS text,
+                       true             AS resolved,
+                       lp.skill_source  AS domain,
                        "learning_pattern" AS signal_type
                 LIMIT $limit
                 """
-                result = session.run(query, domain=domain, interest=interest, limit=limit)
+                result = session.run(query,
+                                     skill_terms=skill_terms,
+                                     domain=domain,
+                                     limit=limit)
                 for row in result.data():
                     signals.append(BehavioralSignal(
                         candidate_id=row["candidate_id"],
-                        text=row["text"],
-                        resolved=row["resolved"],
-                        domain=row["domain"],
+                        text=row["text"] or "",
+                        resolved=bool(row["resolved"]),
+                        domain=row["domain"] or domain,
                         signal_type=row["signal_type"]
                     ))
+
         except Exception as e:
             logger.error(f"Neo4j get_behavioral_signals failed: {e}")
             raise
-            
+
         return signals
 </file>
 
@@ -11052,7 +11318,8 @@ class RAGRetriever(BaseRetriever):
         
         # Derived values for queries
         skills_str = " ".join(skills)
-        chroma_query = f"{background} {skills_str} {interest}".strip()
+        # NEW — more targeted, uses interest + goal as the semantic anchor:
+        chroma_query = f"{interest} {goal} career transition experience".strip()
         # Domain inference: fallback to goal if interest is empty
         domain = interest if interest else goal
         
@@ -11639,7 +11906,13 @@ class RawRepo:
 import logging
 import argparse
 import asyncio
+import os
+import sys
 from dotenv import load_dotenv
+
+# Ensure the root directory is in sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.pipeline.ingestion_orchestrator import run_pipeline as run_ingestion
 from src.app.runner import run_pipeline as run_career_mentorship
 
@@ -11653,39 +11926,93 @@ logging.basicConfig(
 )
 logger = logging.getLogger("src.main")
 
-# CONFIGURATION: Define sources and identifiers here
-INGESTION_CONFIG = {
-    "github": {
-        "usernames": ["octocat", "torvalds", "khushi0605"]
-    },
-    # "kaggle": {
-    #     "batch_limit": 5
-    # }
-}
+async def interactive_session():
+    """
+    Runs an interactive career mentorship session.
+    Optionally accepts a resume file path to enrich the user's profile.
+    """
+    from src.ingestion.resume_parser import parse_resume
+    from src.ingestion.resume_merger import merge_resume_with_query
 
-def main():
+    print("\n" + "="*50)
+    print("🚀 Trajectory-Aware Career Intelligence System")
+    print("="*50 + "\n")
+
+    while True:
+        # --- Optional resume input ---
+        try:
+            resume_path = input("📄 (Optional) Enter path to your resume PDF or TXT [press Enter to skip]: ").strip()
+        except EOFError:
+            break
+
+        resume_text = None
+        if resume_path:
+            if not os.path.exists(resume_path):
+                print(f"⚠️  File not found: '{resume_path}'. Continuing without resume.\n")
+            else:
+                try:
+                    resume_text = parse_resume(resume_path)
+                    print(f"✅ Resume loaded ({len(resume_text)} characters extracted).\n")
+                except Exception as e:
+                    print(f"⚠️  Could not parse resume: {e}. Continuing without resume.\n")
+                    resume_text = None
+
+        # --- Career query input ---
+        try:
+            query = input("🤖 Tell me about your background, skills, interests and career goals\n→ ").strip()
+        except EOFError:
+            break
+
+        if not query: continue
+        if query.lower() in ("exit", "quit", "q"): break
+
+        # --- Merge resume with query if available ---
+        if resume_text:
+            enriched_input = merge_resume_with_query(resume_text, query)
+        else:
+            enriched_input = query
+
+        print("\n🔮 Deep Thinking...")
+        try:
+            await run_career_mentorship(enriched_input)
+        except Exception as e:
+            logger.error(f"Session error: {e}")
+
+        print("\n" + "-"*50 + "\n")
+
+def ingestion_mode():
     """
-    Main entry point for batch ingestion.
-    Iterates through INGESTION_CONFIG and executes the pipeline for each source.
+    Batch ingestion logic.
     """
+    INGESTION_CONFIG = {
+        "github": {
+            "usernames": ["octocat", "torvalds", "khushi0605"]
+        }
+    }
     logger.info("Starting Batch Ingestion Pipeline...")
-    
     for source, params in INGESTION_CONFIG.items():
         logger.info(f"--- Processing Source: {source} ---")
-        
-        usernames = params.get("usernames")
-        batch_limit = params.get("batch_limit", 10)
-        
         try:
-            run_pipeline(
-                source=source,
-                usernames=usernames,
-                batch_limit=batch_limit
-            )
+            # Fix: use run_ingestion (the renamed import)
+            run_ingestion(source=source, usernames=params.get("usernames"))
         except Exception as e:
             logger.error(f"Batch execution failed for {source}: {e}")
-
     logger.info("Batch Ingestion Pipeline completed.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Career Connection Intelligence System")
+    parser.add_argument("--mode", choices=["ingest", "career"], default="career",
+                        help="Mode: 'ingest' for batch data, 'career' for interactive mentorship (default)")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "ingest":
+        ingestion_mode()
+    else:
+        try:
+            asyncio.run(interactive_session())
+        except KeyboardInterrupt:
+            print("\nExiting...")
 
 if __name__ == "__main__":
     main()
@@ -12056,55 +12383,99 @@ htmlcov/
 </file>
 
 <file path="README.md">
-# Career Intelligence System: Ingestion Pipeline
+# Trajectory-Aware Career Mentorship Discovery System
 
-A modular data ingestion system designed to build career trajectories by scraping and processing data from various professional sources.
+A multi-agent career intelligence system that leverages RAG (Retrieval-Augmented Generation) over career trajectories to provide grounded, near-peer mentorship.
 
-## 📁 Repository Structure
+## 🏗 System Architecture
+
+The project is structured into 4 logical phases:
+
+1.  **Ingestion Pipeline**: Collects data from GitHub (repositories, commits) and Kaggle (datasets) to build initial candidate profiles.
+2.  **Retrieval Layer**: A hybrid RAG system using **Neo4j** for graph trajectories (career paths, behavioral signals) and **ChromaDB** for semantic narrative search (Medium articles, project descriptions).
+3.  **LLM Reasoning Layer**: Powered by **Gemini 2.0/1.5 Flash**, enforcing grounding constraints to ensure all advice is backed by retrieved "peer" evidence.
+4.  **Agentic Orchestration**: A 7-agent ensemble orchestrated via **LangGraph**, featuring:
+    *   `ProfileUnderstandingAgent`: Intent extraction.
+    *   `ExperienceRetrievalAgent`: Parallel data fetching (Neo4j + Chroma).
+    *   `CareerReasoningAgent`: Trajectory analysis.
+    *   `ExperienceAnalysisAgent`: Behavioral synthesis.
+    *   `MentorDiscoveryAgent`: Ranking and matching.
+    *   `OutreachAgent`: Generative connection messaging.
+    *   `FeedbackAgent`: Human-in-the-loop refinement.
+
+---
+
+## 📂 File Structure
+
 ```text
-.
-├── ingestion_pipeline/
-│   ├── configs/             # Source configurations (YAML)
-│   ├── data/                # Raw scraped data (Gitignored)
-│   ├── src/                 # Core logic, collectors, and scrapers
-│   ├── tests/               # Integration and unit tests
-│   └── main.py              # Entry point for batch ingestion
-└── .gitignore               # Standard exclusions
+ingestion_pipeline/
+├── configs/                # YAML configurations for LLM, Retrieval, and Ingestion
+├── data/
+│   ├── chroma_db/          # Persistent Vector Database
+│   └── processed/          # Intermediate data artifacts
+├── docs/                   # Architectural specifications and design docs
+├── src/
+│   ├── agents/             # LangGraph agent node implementations
+│   ├── app/                # Graph assembly, state management, and runner
+│   ├── core/               # Shared types, exceptions, and utilities
+│   ├── enrichment/         # Signal inference and reachability scoring
+│   ├── ingestion/          # Source-specific collectors (GitHub, Kaggle)
+│   ├── llm/                # Gemini client, prompt builder, and schema parser
+│   ├── matching/           # Profile-to-Role matching logic
+│   ├── pipeline/           # Orchestration for batch ingestion
+│   ├── retrieval/          # RAG connectors (Neo4j, ChromaDB)
+│   ├── storage/            # Database ingestors (Neo4j, Chroma)
+│   └── main.py             # Main entrypoint (CLI)
+├── tests/                  # E2E and unit tests
+├── requirements.txt        # Project dependencies
+└── .env                    # Environment variables (API Keys, DB Credentials)
 ```
+
+---
 
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
 - Python 3.9+
-- GitHub Personal Access Token (for high-limit scraping)
+- Neo4j Instance (Running)
+- Google Gemini API Key
 
-### 2. Setup
+### 2. Installation
 ```bash
-# 1. Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows use: venv\Scripts\activate
-
-# 2. Install dependencies
-pip install -r ingestion_pipeline/requirements.txt
-
-# 3. Configure environment variables
-cd ingestion_pipeline
-cp .env.example .env
-# Edit .env with your credentials
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### 3. Usage
-Run the batch ingestion pipeline for specific sources:
+
+The system operates in two modes:
+
+#### **Interactive Career Mentorship (Phase 4)**
+Talk to the agentic system and get personalized career guidance.
 ```bash
-export PYTHONPATH=.
-python3 src/main.py
+python src/main.py --mode career
 ```
 
-## 🛠 Features
-- **GitHub Scraper**: Professional REST API implementation with schema mapping.
-- **Kaggle Collector**: Automated metadata retrieval for competitions.
-- **Modular Design**: Easy to extend with new collectors/scrapers.
-- **Rate Limiting**: Built-in throttling and retry logic for APIs.
+#### **Batch Data Ingestion (Phase 1-2)**
+Collect data from configured sources to populate the knowledge graph.
+```bash
+python src/main.py --mode ingest
+```
+
+---
+
+## 🧪 Verification
+Run the end-to-end pipeline test to verify agent orchestration and grounding:
+```bash
+PYTHONPATH=. python tests/test_pipeline_e2e.py
+```
+
+## 📜 Documentation
+For detailed specs, see the `docs/` folder:
+- [Agent Specs](docs/agents.md)
+- [Retrieval Arch](docs/rag.md)
+- [LLM Design](docs/systemprompts.md)
 </file>
 
 <file path="rebuild_graph.py">
@@ -12244,6 +12615,31 @@ chromadb>=0.4.0
 sentence-transformers>=2.2.0
 google-generativeai>=0.8.0
 langgraph>=0.2.2
+pdfplumber>=0.10.0
+</file>
+
+<file path="test_model.py">
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+# Sanity check with the requested model string
+model_name = "models/gemini-flash-latest"
+print(f"Testing model: {model_name}")
+
+try:
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content("Say hello in one sentence.")
+    print(f"Response: {response.text}")
+    print("\n✅ Success! Your API key and model string are working.")
+    print(f"Update your configs/llm.yaml to use: \"{model_name}\"")
+except Exception as e:
+    print(f"\n❌ Error: {e}")
+    print("If you hit 429, your daily quota is exhausted.")
+    print("If you hit 404, the model name is incorrect.")
 </file>
 
 <file path="test_score.py">

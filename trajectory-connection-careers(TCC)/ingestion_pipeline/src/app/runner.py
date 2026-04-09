@@ -21,6 +21,7 @@ def print_agent_delta(state: AgentState):
         "profile_understanding": "user_profile",
         "experience_retrieval": "retrieval_context",
         "career_reasoning": "career_paths",
+        "multi_agent_debate": "debate_result",
         "experience_analysis": "experience_insights",
         "mentor_discovery": "mentor_ranking",
         "outreach": "outreach_drafts",
@@ -30,7 +31,10 @@ def print_agent_delta(state: AgentState):
     key = mapping.get(last_agent)
     if key and state.get(key):
         val = state[key]
-        if hasattr(val, "model_dump_json"):
+        if last_agent == "multi_agent_debate":
+            from src.agents.multi_agent_debate import format_debate_summary
+            print(format_debate_summary(val))
+        elif hasattr(val, "model_dump_json"):
             print(val.model_dump_json(indent=2))
         elif isinstance(val, list):
             # For outreach_drafts

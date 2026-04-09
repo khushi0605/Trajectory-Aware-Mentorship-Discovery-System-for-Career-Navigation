@@ -152,7 +152,7 @@ You are a mentor matching engine. Rank the candidates in CONTEXT as potential
 mentors for the user described below.
 
 RANKING CRITERIA (in order of priority):
-1. reachability_score >= 0.6 (near-peer constraint)
+1. reachability_score >= 0.45 (near-peer constraint — calibrated to graph data distribution)
 2. Path alignment: how closely their trajectory matches the user's goal
 3. Skill overlap with the user's current skills
 4. Presence of resolved struggles in the user's target domain

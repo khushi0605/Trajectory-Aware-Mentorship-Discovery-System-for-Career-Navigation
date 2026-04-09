@@ -10,6 +10,8 @@ class ExperienceAnalysisAgent(BaseAgent):
     """
     Agent 4: Synthesizes behavioral_signals and narrative_chunks.
     Produces ExperienceInsights.
+    When a debate_result is present in state, the analysis is grounded in
+    the MAD consensus path rather than raw CareerReasoningAgent output.
     """
     
     async def run(self, state: AgentState) -> Dict[str, Any]:
@@ -23,12 +25,25 @@ class ExperienceAnalysisAgent(BaseAgent):
             if not profile or not context:
                 raise ValueError("Missing profile or context for experience analysis")
 
-            # Build prompts
+            # Build base prompts
             system, user = self.prompts.for_experience_analysis(
                 context, 
                 profile.background, 
                 profile.goal
             )
+
+            # Inject debate verdict context if available (Step 4)
+            debate_result = state.get("debate_result") or {}
+            if debate_result:
+                final_verdict = debate_result.get("final_verdict", {})
+                critic_stance = debate_result.get("critic_stance", {})
+                debate_addendum = (
+                    f"\nDebate verdict: {final_verdict.get('consensus_path', 'N/A')}"
+                    f"\nConfidence: {final_verdict.get('confidence', 'N/A')}"
+                    f"\nKey risks identified: {critic_stance.get('risks', [])}"
+                )
+                user = user + debate_addendum
+                logger.info("[ExperienceAnalysis] Debate context injected into prompt.")
             
             # Call LLM
             insights = await self.llm.generate_structured(
@@ -46,3 +61,4 @@ class ExperienceAnalysisAgent(BaseAgent):
             update = self._handle_error(agent_name, e, state)
             update["experience_insights"] = None
             return update
+

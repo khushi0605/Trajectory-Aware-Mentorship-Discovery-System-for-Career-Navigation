@@ -79,3 +79,32 @@ class FeedbackSignal(BaseModel):
     raw_feedback: str = Field(description="Original user feedback string")
     target_agent: Literal["career_reasoning", "experience_analysis", "mentor_discovery", "outreach", "end"] = Field(default="end", description="Agent identified for refinement")
     refinement_instruction: str = Field(default="", description="Specific instruction for the re-run")
+
+# --- Multi-Agent Debate (MAD) Models ---
+
+class OptimistStance(BaseModel):
+    recommended_path: str = Field(default="", description="The fastest realistic career path to the target role")
+    rationale: str = Field(default="", description="Why this path is viable and momentum-building")
+    key_bets: List[str] = Field(default_factory=list, description="Bold but achievable moves with estimated timelines")
+
+class RealistStance(BaseModel):
+    recommended_path: str = Field(default="", description="The safest, most grounded path with least risk")
+    rationale: str = Field(default="", description="Why this path is stable and compensation-preserving")
+    key_bets: List[str] = Field(default_factory=list, description="Incremental skill-building steps and internal moves")
+
+class CriticStance(BaseModel):
+    risks: List[str] = Field(default_factory=list, description="Real market risks, blockers, and overly-optimistic assumptions")
+    red_flags: List[str] = Field(default_factory=list, description="Credential gaps and competitive threats to watch out for")
+
+class DebateVerdict(BaseModel):
+    consensus_path: str = Field(default="", description="Agreed recommended path accounting for critic's risks")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Agreement score across the 3 agents (0=full disagreement, 1=full agreement)")
+    reasoning: str = Field(default="", description="Explanation of how the consensus was reached")
+    debate_rounds: int = Field(default=2, description="Number of debate rounds conducted")
+
+class DebateOutput(BaseModel):
+    optimist_stance: OptimistStance = Field(default_factory=OptimistStance)
+    realist_stance: RealistStance = Field(default_factory=RealistStance)
+    critic_stance: CriticStance = Field(default_factory=CriticStance)
+    final_verdict: DebateVerdict = Field(default_factory=DebateVerdict)
+
