@@ -1,7 +1,8 @@
+import os
 import logging
 from functools import partial
 from langgraph.graph import StateGraph, START, END
-from src.llm import GeminiClient, PromptBuilder, load_llm_config
+from src.llm import LLMClient, PromptBuilder, load_llm_config
 from src.retrieval.rag_retriever import RAGRetriever
 from src.retrieval.config.retriever_config import RetrieverConfig
 # Direct agent module imports — do NOT import from src.agents (package __init__)
@@ -41,7 +42,7 @@ def create_app():
     load_dotenv()
     # 1. Initialize shared components
     llm_config = load_llm_config("configs/llm.yaml")
-    llm_client = GeminiClient(llm_config)
+    llm_client = LLMClient(llm_config)
     prompt_builder = PromptBuilder()
     
     # Fix: Use the config loader
@@ -76,8 +77,13 @@ def create_app():
     workflow.add_edge("career_reasoning", "multi_agent_debate")   # NEW: debate inserted here
     workflow.add_edge("multi_agent_debate", "experience_analysis") # was: career_reasoning -> experience_analysis
     workflow.add_edge("experience_analysis", "mentor_discovery")
-    workflow.add_edge("mentor_discovery", "outreach")
-    workflow.add_edge("outreach", "feedback")
+    
+    # Optional: Skip outreach for benchmarking or internal flows
+    if os.getenv("SKIP_OUTREACH") == "true":
+        workflow.add_edge("mentor_discovery", "feedback")
+    else:
+        workflow.add_edge("mentor_discovery", "outreach")
+        workflow.add_edge("outreach", "feedback")
 
     # 6. Add Conditional Edges from Feedback node
     workflow.add_conditional_edges(

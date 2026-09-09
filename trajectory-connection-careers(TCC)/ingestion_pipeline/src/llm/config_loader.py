@@ -1,6 +1,6 @@
 import os
 import yaml
-from .models import FullLLMConfig
+from src.llm.models import FullLLMConfig
 
 def load_llm_config(path: str = "configs/llm.yaml") -> FullLLMConfig:
     """

@@ -36,7 +36,7 @@ class LLMEventCapture(logging.Filter):
             failure_counter["llm"] = failure_counter.get("llm", 0) + 1
         if "max_tokens" in msg or "finish_reason" in msg and "max" in msg:
             max_token_counter["hits"] = max_token_counter.get("hits", 0) + 1
-        if "gemini api" in msg or "generate_content" in msg:
+        if "groq api" in msg or "chat.completions" in msg:
             request_counter["total"] = request_counter.get("total", 0) + 1
         return False  # suppress from terminal
 
@@ -50,16 +50,12 @@ for _n in ["llm.client", "agents.debate", "agents.base", "agents.reasoning",
 PROFILES = [
     ("student / ml_engineer",
      "I'm a final-year CS student with Python, TensorFlow and 2 GitHub ML projects. I want to become an ml_engineer."),
-    ("student / research_scientist",
-     "I'm a grad student with an NLP thesis and 3 deep-learning publications. I want to become a research_scientist."),
     ("junior / ml_engineer",
      "I'm a junior software developer with 1 year of Python and scikit-learn. I'm targeting an ml_engineer role."),
-    ("junior / ai_engineer",
-     "I'm a junior data analyst with 6 months of PyTorch self-study. I want to transition to ai_engineer."),
     ("mid / ml_engineer",
      "I'm a mid-level software engineer with 3 years of Python, Docker and REST APIs targeting ml_engineer."),
-    ("mid / ai_engineer",
-     "I'm a mid-level data scientist with 4 years of ML pipelines. My target is ai_engineer at a product company."),
+    ("junior / ai_engineer",
+     "I'm a junior data analyst with 6 months of PyTorch self-study. I want to transition to ai_engineer."),
     ("mid / research_scientist",
      "I'm a mid-level ML engineer with computer vision expertise pivoting toward research_scientist at a top lab."),
 ]
@@ -155,9 +151,9 @@ def print_table(stats: Dict[str, AgentStats], e2e_lats, e2e_fails, n,
                 debate_retry_pct, debate_fail_pct, mt_pct, total_requests):
     W = 115
     print(f"\n{'='*W}")
-    print(f"  AGENT RELIABILITY & EFFICIENCY TABLE")
+    print(f"  AGENT RELIABILITY & EFFICIENCY TABLE (GROQ / LLAMA-3.3-70B)")
     print(f"  {n} profiles: student/junior/mid × ml_engineer/ai_engineer/research_scientist")
-    print(f"  Total Gemini API requests used: ~{total_requests} | Est. cost at Flash pricing: ~${total_requests*0.000075:.3f}")
+    print(f"  Total API requests used: ~{total_requests}")
     print(f"{'='*W}")
     COL = [26, 16, 20, 26, 22]
     def hdr(*cols): return "  " + " | ".join(f"{c[0]:<{c[1]}}" if i==0 else f"{c[0]:>{c[1]}}" for i,c in enumerate(zip(cols,COL)))
@@ -213,7 +209,7 @@ async def main():
     print(f"{'='*70}\n")
 
     for i, (label, query) in enumerate(PROFILES):
-        print(f"  [{i+1:02d}/{len(PROFILES)}] {label} ... ", end="", flush=True)
+        print(f"  [{i+1:02d}/{len(PROFILES)}] {label} ... (processing)")
         r_before = retry_counter.get("llm", 0)
         mt_before = max_token_counter.get("hits", 0)
         try:

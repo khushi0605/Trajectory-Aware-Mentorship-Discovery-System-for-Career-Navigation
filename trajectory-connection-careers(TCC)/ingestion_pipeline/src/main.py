@@ -3,10 +3,13 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Ensure the root directory is in sys.path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add the project root to the Python path
+project_root = str(Path(__file__).resolve().parent.parent if "src" in str(Path(__file__)) else Path(__file__).resolve().parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from src.pipeline.ingestion_orchestrator import run_pipeline as run_ingestion
 from src.app.runner import run_pipeline as run_career_mentorship

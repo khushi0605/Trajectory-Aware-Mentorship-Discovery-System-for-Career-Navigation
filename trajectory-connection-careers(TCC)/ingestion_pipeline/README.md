@@ -2,21 +2,28 @@
 
 A multi-agent career intelligence system that leverages RAG (Retrieval-Augmented Generation) over career trajectories to provide grounded, near-peer mentorship.
 
+## ✨ Key Advancements (Recent Updates)
+
+*   **Multi-Agent Debate (MAD) Module**: Career recommendations are now scrutinized by a 3-persona agent ensemble (**Optimist**, **Realist**, **Critic**) ensuring high-nuance advice and assumption-challenging.
+*   **Quota-Aware LLM Layer**: Enhanced Gemini client with exponential backoff and staggered execution to handle API rate limits (essential for free-tier users).
+*   **Mentor Reachability Calibration**: Mentor discovery thresholds are now dynamically calibrated (0.45) based on Neo4j graph data distribution for higher matching precision.
+*   **Performance Benchmarking**: A comprehensive instrumentation harness to track per-agent latency and output completeness across synthetic profiles.
+
+---
+
 ## 🏗 System Architecture
 
 The project is structured into 4 logical phases:
 
-1.  **Ingestion Pipeline**: Collects data from GitHub (repositories, commits) and Kaggle (datasets) to build initial candidate profiles.
-2.  **Retrieval Layer**: A hybrid RAG system using **Neo4j** for graph trajectories (career paths, behavioral signals) and **ChromaDB** for semantic narrative search (Medium articles, project descriptions).
-3.  **LLM Reasoning Layer**: Powered by **Gemini 2.0/1.5 Flash**, enforcing grounding constraints to ensure all advice is backed by retrieved "peer" evidence.
-4.  **Agentic Orchestration**: A 7-agent ensemble orchestrated via **LangGraph**, featuring:
-    *   `ProfileUnderstandingAgent`: Intent extraction.
-    *   `ExperienceRetrievalAgent`: Parallel data fetching (Neo4j + Chroma).
-    *   `CareerReasoningAgent`: Trajectory analysis.
-    *   `ExperienceAnalysisAgent`: Behavioral synthesis.
-    *   `MentorDiscoveryAgent`: Ranking and matching.
+1.  **Ingestion Pipeline**: Collects data from GitHub and Kaggle to build initial candidate profiles.
+2.  **Retrieval Layer**: A hybrid RAG system using **Neo4j** for graph trajectories (reachability scoring) and **ChromaDB** for semantic narrative search.
+3.  **LLM Reasoning Layer**: Powered by **Gemini 1.5 Flash**, featuring a unified client with structured output validation and retry logic.
+4.  **Agentic Orchestration**: Orchestrated via **LangGraph**, featuring:
+    *   `ProfileUnderstandingAgent`: Intent extraction and resume parsing (PDF/TXT supported).
+    *   `MultiAgentDebateNode`: Peer-review logic (Optimist/Realist/Critic).
+    *   `ExperienceAnalysisAgent`: Collaborative struggle detection.
+    *   `MentorDiscoveryAgent`: Calibrated trajectory matching.
     *   `OutreachAgent`: Generative connection messaging.
-    *   `FeedbackAgent`: Human-in-the-loop refinement.
 
 ---
 
@@ -41,7 +48,7 @@ ingestion_pipeline/
 │   ├── retrieval/          # RAG connectors (Neo4j, ChromaDB)
 │   ├── storage/            # Database ingestors (Neo4j, Chroma)
 │   └── main.py             # Main entrypoint (CLI)
-├── tests/                  # E2E and unit tests
+├── tests/                  # MAD unit tests and E2E pipeline tests
 ├── requirements.txt        # Project dependencies
 └── .env                    # Environment variables (API Keys, DB Credentials)
 ```
@@ -80,14 +87,6 @@ python src/main.py --mode ingest
 
 ---
 
-## 🧪 Verification
-Run the end-to-end pipeline test to verify agent orchestration and grounding:
-```bash
-PYTHONPATH=. python tests/test_pipeline_e2e.py
-```
-
 ## 📜 Documentation
-For detailed specs, see the `docs/` folder:
-- [Agent Specs](docs/agents.md)
-- [Retrieval Arch](docs/rag.md)
-- [LLM Design](docs/systemprompts.md)
+- [Latest Walkthrough](walkthrough.md): Summary of MAD logic and Quota fixes.
+- [Project Breakdown](project_breakdown.md): Deep dive into agent interactions.

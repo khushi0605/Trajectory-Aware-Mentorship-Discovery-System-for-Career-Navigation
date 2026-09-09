@@ -3,11 +3,11 @@ import asyncio
 import logging
 import time
 from typing import Dict, Any, List
-from .base_retriever import BaseRetriever
-from .models import RetrievalContext, RetrievalMetadata, TrajectoryPath, BehavioralSignal, NarrativeChunk
-from .connectors.neo4j_connector import Neo4jConnector
-from .connectors.chroma_connector import ChromaConnector
-from .config.retriever_config import RetrieverConfig
+from src.retrieval.base_retriever import BaseRetriever
+from src.retrieval.models import RetrievalContext, RetrievalMetadata, TrajectoryPath, BehavioralSignal, NarrativeChunk
+from src.retrieval.connectors.neo4j_connector import Neo4jConnector
+from src.retrieval.connectors.chroma_connector import ChromaConnector
+from src.retrieval.config.retriever_config import RetrieverConfig
 
 logger = logging.getLogger("rag_retriever")
 

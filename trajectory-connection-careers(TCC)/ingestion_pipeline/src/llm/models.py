@@ -7,11 +7,15 @@ class LLMConfig(BaseModel):
     temperature: float
     max_output_tokens: int
     timeout_seconds: int
+    base_url: Optional[str] = None
 
 class GroundingConfig(BaseModel):
     enforce_context_only: bool
     max_context_tokens: int
 
 class FullLLMConfig(BaseModel):
-    gemini: LLMConfig
+    provider: str = "ollama"
+    ollama: Optional[LLMConfig] = None
+    groq: Optional[LLMConfig] = None
+    openai: Optional[LLMConfig] = None
     grounding: GroundingConfig

@@ -1,6 +1,6 @@
-from .client import GeminiClient
-from .prompt_builder import PromptBuilder
-from .config_loader import load_llm_config
-from .models import FullLLMConfig
+from src.llm.client import UnifiedLLMClient as LLMClient
+from src.llm.prompt_builder import PromptBuilder
+from src.llm.config_loader import load_llm_config
+from src.llm.models import FullLLMConfig
 
-__all__ = ["GeminiClient", "PromptBuilder", "load_llm_config", "FullLLMConfig"]
+__all__ = ["LLMClient", "PromptBuilder", "load_llm_config", "FullLLMConfig"]

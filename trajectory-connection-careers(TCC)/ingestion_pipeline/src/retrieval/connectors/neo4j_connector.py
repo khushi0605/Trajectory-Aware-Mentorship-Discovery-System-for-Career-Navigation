@@ -2,8 +2,8 @@ from __future__ import annotations
 import logging
 from typing import List, Dict, Any, Tuple
 from neo4j import GraphDatabase
-from ..models import TrajectoryPath, BehavioralSignal
-from ..config.retriever_config import Neo4jConfig
+from src.retrieval.models import TrajectoryPath, BehavioralSignal
+from src.retrieval.config.retriever_config import Neo4jConfig
 
 logger = logging.getLogger("neo4j_connector")
 

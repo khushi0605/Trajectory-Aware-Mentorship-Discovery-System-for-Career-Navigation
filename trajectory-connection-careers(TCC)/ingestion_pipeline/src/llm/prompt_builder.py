@@ -30,36 +30,31 @@ class PromptBuilder:
         Implements token budget truncation logic.
         """
         # Truncation logic (order: narratives -> behavioral -> reasoning)
-        # 1. Narratives to top 10
-        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:10]
+        # 1. Narratives to top 5 (reduced for TPM)
+        narratives = sorted(context.narrative_chunks, key=lambda x: x.relevance_score, reverse=True)[:5]
         
-        # 2. Behavioral to top 20
-        behavioral = context.behavioral_signals[:20]
+        # 2. Behavioral to top 10 (reduced for TPM)
+        behavioral = context.behavioral_signals[:10]
         
-        # 3. Paths (never truncated by count)
-        paths = context.trajectory_paths
+        # 3. Paths (limit to top 15)
+        paths = context.trajectory_paths[:15]
         
         # Assembly
         lines = []
         
         lines.append("=== CAREER TRAJECTORY PATHS ===")
         for i, p in enumerate(paths, 1):
-            # Reasoning truncation logic: if we were over budget (simulated by length check)
-            # For now, let's just stick to the requested format
-            lines.append(f"[{i}] candidate_id: {p.candidate_id} | avg_reachability: {p.reachability_score}")
-            lines.append(f"    key_decision: \"{p.decision_text}\"")
-            lines.append(f"    trigger: \"{p.trigger}\"")
-            lines.append(f"    path_description: {p.target_role}") # Simplified path for now as per model
+            lines.append(f"[{i}] id: {p.candidate_id} | score: {p.reachability_score}")
+            lines.append(f"  dec: \"{p.decision_text}\"")
+            lines.append(f"  path: {p.target_role}") 
             
         lines.append("\n=== BEHAVIORAL SIGNALS ===")
         for s in behavioral:
-            lines.append(f"[{s.signal_type}] {s.candidate_id} | domain: {s.domain} | resolved: {s.resolved}")
-            lines.append(f"  \"{s.text}\"")
+            lines.append(f"[{s.signal_type}] {s.candidate_id}: \"{s.text}\"")
             
         lines.append("\n=== NARRATIVE EXPERIENCES ===")
         for i, n in enumerate(narratives, 1):
-            lines.append(f"[chunk {i}] role: {n.role} | domain: {n.domain} | relevance: {n.relevance_score}")
-            lines.append(f"  \"{n.text}\"")
+            lines.append(f"[chunk {i}] {n.role} in {n.domain}: \"{n.text}\"")
             
         return "\n".join(lines)
 

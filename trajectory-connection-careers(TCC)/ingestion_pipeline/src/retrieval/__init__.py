@@ -1,6 +1,6 @@
-from .rag_retriever import RAGRetriever
-from .models import RetrievalContext, TrajectoryPath, BehavioralSignal, NarrativeChunk
-from .config.retriever_config import RetrieverConfig
+from src.retrieval.rag_retriever import RAGRetriever
+from src.retrieval.models import RetrievalContext, TrajectoryPath, BehavioralSignal, NarrativeChunk
+from src.retrieval.config.retriever_config import RetrieverConfig
 
 __all__ = [
     "RAGRetriever",

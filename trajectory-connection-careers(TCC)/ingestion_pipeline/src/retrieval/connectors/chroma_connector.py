@@ -3,8 +3,8 @@ import logging
 from typing import List
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from ..models import NarrativeChunk
-from ..config.retriever_config import ChromaConfig
+from src.retrieval.models import NarrativeChunk
+from src.retrieval.config.retriever_config import ChromaConfig
 
 logger = logging.getLogger("chroma_connector")
 

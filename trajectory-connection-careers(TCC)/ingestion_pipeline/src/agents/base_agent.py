@@ -4,13 +4,13 @@ from typing import Dict, Any, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.app.state import AgentState
-    from src.llm.client import GeminiClient
+    from src.llm import LLMClient
     from src.llm.prompt_builder import PromptBuilder
 
 logger = logging.getLogger("agents.base")
 
 class BaseAgent(ABC):
-    def __init__(self, llm_client: "GeminiClient", prompt_builder: "PromptBuilder"):
+    def __init__(self, llm_client: "LLMClient", prompt_builder: "PromptBuilder"):
         self.llm = llm_client
         self.prompts = prompt_builder
 

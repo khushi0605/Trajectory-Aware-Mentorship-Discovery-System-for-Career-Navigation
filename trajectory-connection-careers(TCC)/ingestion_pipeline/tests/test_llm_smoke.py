@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.llm import GeminiClient, PromptBuilder, load_llm_config
+from src.llm import LLMClient, PromptBuilder, load_llm_config
 from src.agents.models import UserProfile
 
 async def main():
@@ -24,9 +24,9 @@ async def main():
         return
 
     # 2. Instantiate Client and Builder
-    client = GeminiClient(config)
+    client = GroqClient(config)
     builder = PromptBuilder()
-    print("✅ GeminiClient and PromptBuilder instantiated.")
+    print("✅ GroqClient and PromptBuilder instantiated.")
 
     # 3. Call for_profile_understanding
     raw_input = "I'm a CS student, know Python and basic ML, interested in computer vision, not sure if research or industry"
@@ -36,7 +36,7 @@ async def main():
     print(f"--- User ---\n{user}")
 
     # 4. Generate Structured Output
-    print("\n🤖 Calling GeminiClient.generate_structured()...")
+    print("\n🤖 Calling GroqClient.generate_structured()...")
     try:
         profile = await client.generate_structured(system, user, UserProfile)
         

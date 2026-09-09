@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Optional
 
-from google.api_core import exceptions as google_exceptions
+from src.core.exceptions import LLMRateLimitError
 
 # Direct module import to avoid circular dependency via src.agents.__init__
 from src.agents.models import (
@@ -133,7 +133,7 @@ class MultiAgentDebateAgent:
                     user_prompt=user_prompt,
                     max_tokens=2048,
                 )
-            except google_exceptions.ResourceExhausted:
+            except LLMRateLimitError:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 30
                     logger.warning(
@@ -282,7 +282,43 @@ class MultiAgentDebateAgent:
                 f"[Debate] Completed. Consensus: '{verdict.consensus_path}' "
                 f"(confidence={verdict.confidence:.0%})"
             )
-            return {"debate_result": output.model_dump()}
+            
+            # --- IMPLICIT STATE OVERWRITE ---
+            # Parse the consensus back into the global CareerPathOptions
+            # so downstream agents (ExperienceAnalysis, MentorDiscovery) use it!
+            from src.agents.models import CareerPathOptions
+            
+            orig_paths = career_context.get("recommended_paths", [])
+            new_paths = []
+            
+            if orig_paths:
+                # Merge the consensus into the top path's structure to retain metadata (reachability, candidates)
+                top_path_data = orig_paths[0].copy() if isinstance(orig_paths[0], dict) else dict(orig_paths[0])
+                top_path_data["path_description"] = verdict.consensus_path
+                new_paths.append(top_path_data)
+            else:
+                new_paths.append({
+                    "path_description": verdict.consensus_path,
+                    "avg_reachability": 0.0,
+                    "key_decision": "Debate Consensus",
+                    "estimated_hops": 0
+                })
+
+            updated_reasoning = f"DEBATE CONSENSUS (Confidence: {verdict.confidence:.0%}): {verdict.reasoning}\n\nCritic Risks: {', '.join(critic.risks)}"
+            
+            updated_career_paths = {
+                "recommended_paths": new_paths,
+                "reasoning": updated_reasoning,
+                "data_gaps": career_context.get("data_gaps", []) + critic.risks,
+                "data_sufficient": career_context.get("data_sufficient", True)
+            }
+            
+            updated_career_paths_obj = CareerPathOptions(**updated_career_paths)
+            
+            return {
+                "debate_result": output.model_dump(),
+                "career_paths": updated_career_paths_obj
+            }
 
         except Exception as e:
             logger.error(f"[Debate] Debate agent failed: {e}. Returning fallback output.")
