@@ -45,8 +45,8 @@ class RAGRetriever(BaseRetriever):
         
         # Async tasks
         tasks = [
-            self._safe_call(self.neo4j.get_trajectory_paths(interest, goal, limit), "neo4j_paths"),
-            self._safe_call(self.neo4j.get_behavioral_signals(domain, interest, behavioral_limit), "neo4j_signals"),
+            self._safe_call(self.neo4j.get_trajectory_paths(interest, goal, skills, limit), "neo4j_paths"),
+            self._safe_call(self.neo4j.get_behavioral_signals(domain, interest, skills, behavioral_limit), "neo4j_signals"),
             self._safe_call(self.chroma.search(chroma_query, k), "chroma_search")
         ]
         

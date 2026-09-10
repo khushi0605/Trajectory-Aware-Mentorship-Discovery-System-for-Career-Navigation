@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
+from typing import Optional, Any
 
 from src.core.exceptions import LLMRateLimitError
 
@@ -15,62 +15,37 @@ logger = logging.getLogger("agents.debate")
 
 # ─── Persona prompts ──────────────────────────────────────────────────────────
 
-OPTIMIST_SYSTEM = """You are an ambitious career strategist. You identify the fastest realistic \
-path to the user's target role. Focus on opportunities, momentum, and bold but achievable moves. \
-Be specific about timelines.
+OPTIMIST_SYSTEM = """You are an ambitious career strategist. Analyze the user's profile and the retrieved empirical paths. 
+Your job is to champion the highest-ceiling, most ambitious trajectory from the data.
 
-Return ONLY valid JSON matching this schema:
-{
-  "recommended_path": "string — the fastest viable career trajectory",
-  "rationale": "string — why this is achievable",
-  "key_bets": ["list of bold but actionable moves with timelines"]
-}"""
+RULES:
+1. ONLY recommend a path from the provided context.
+2. Formulate 'key_bets' that aggressively bridge the gap between the user's current skills and the target role. 
+3. Focus on momentum—how can their existing skills act as a springboard? Be specific about the transition strategy."""
 
-REALIST_SYSTEM = """You are a pragmatic career advisor. You recommend the safest, most grounded \
-path with least risk to current compensation and stability. Prioritize internal moves and \
-incremental skill-building.
+REALIST_SYSTEM = """You are a pragmatic career advisor. Analyze the user's profile and the retrieved empirical paths.
+Your job is to champion the safest, most stable trajectory from the data, prioritizing high reachability and minimal hops.
 
-Return ONLY valid JSON matching this schema:
-{
-  "recommended_path": "string — the safest career trajectory",
-  "rationale": "string — why this path minimizes risk",
-  "key_bets": ["list of incremental steps and internal opportunities"]
-}"""
+RULES:
+1. ONLY recommend a path from the provided context.
+2. Formulate 'key_bets' that are highly incremental and safe. Focus on closing immediate skill gaps before attempting a role transition.
+3. Emphasize utilizing their current background and explicitly listed skills to minimize transition risk."""
 
-CRITIC_SYSTEM = """You are a skeptical career analyst. Your job is to identify every real risk, \
-blocker, and assumption the other advisors are glossing over. Be specific about market conditions, \
-credential gaps, and competition.
+CRITIC_SYSTEM = """You are a rigorous, adversarial career feasibility critic. Your exact job is to prevent "feasibility hallucination."
+Compare the user's current profile (skills, experience_level) against the proposed empirical paths. 
 
-Return ONLY valid JSON matching this schema:
-{
-  "risks": ["list of real market risks and blockers"],
-  "red_flags": ["list of credential gaps and competitive threats"]
-}"""
+RULES (NO MACROECONOMIC HALLUCINATIONS):
+1. Do not invent generic risks (e.g., 'market volatility').
+2. FIND CREDENTIAL GAPS: If the user is a 'student' or 'intern' but the path leads to a senior architect role, you MUST severely flag the experience gap and unrealistic hops.
+3. FIND SKILL GAPS: Compare the user's current skills to the realities of the target role. What specific technical prerequisites are they missing?
+4. Call out low reachability scores as empirical proof of high transition friction."""
 
-SYNTHESIZER_SYSTEM = """You are a neutral career mediator. You have received three career \
-recommendations from an Optimist, a Realist, and a Critic. Synthesize them into a single \
-consensus recommendation.
+SYNTHESIZER_SYSTEM = """You are the final career architect. You must synthesize the Optimist's ambition, the Realist's pragmatism, and the Critic's harsh feasibility gap analysis.
 
-Your task:
-1. Identify where Optimist and Realist agree (boosts confidence).
-2. Make sure the Critic's top risks are factored into the final recommendation.
-3. Assign a confidence score (0.0 to 1.0) based on how much the agents agreed 
-   (1.0 = all three aligned, 0.0 = complete disagreement).
-
-Return ONLY valid JSON matching this schema:
-{
-  "consensus_path": "string — the balanced recommended path accounting for key risks",
-  "confidence": 0.75,
-  "reasoning": "string — how you resolved disagreements and weighed the stances",
-  "debate_rounds": 2
-}"""
-
-
-def _strip_json_fences(text: str) -> str:
-    """Remove ```json ... ``` fences before parsing."""
-    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"```\s*$", "", cleaned)
-    return cleaned.strip()
+RULES:
+1. The 'consensus_path' MUST be one of the paths originally provided in the context.
+2. The 'reasoning' MUST explicitly address how to mitigate the Critic's red flags using the strategic stepping-stones proposed by the Optimist/Realist. Do not ignore the Critic.
+3. Assign a 'confidence' score (0.0 to 1.0). If the Critic found massive credential gaps (e.g., an Intern jumping directly to Architect), the confidence MUST be low (< 0.5) to reflect transition risk."""
 
 
 def _trim_career_context(career_context: dict) -> dict:
@@ -123,15 +98,16 @@ class MultiAgentDebateAgent:
         self.llm = llm_client
 
     async def _call_with_retry(
-        self, system_prompt: str, user_prompt: str, max_retries: int = 3
-    ) -> str:
-        """LLM call with exponential backoff for rate limits (matches existing client pattern)."""
+        self, system_prompt: str, user_prompt: str, response_schema: Any, max_retries: int = 3
+    ) -> Any:
+        """LLM call with exponential backoff for rate limits, enforcing structured output."""
         for attempt in range(max_retries):
             try:
-                return await self.llm.generate(
+                return await self.llm.generate_structured(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
-                    max_tokens=2048,
+                    response_schema=response_schema,
+                    temperature=0.3
                 )
             except LLMRateLimitError:
                 if attempt < max_retries - 1:
@@ -143,46 +119,45 @@ class MultiAgentDebateAgent:
                     await asyncio.sleep(wait_time)
                 else:
                     raise
+            except Exception as e:
+                # Catch structured parsing errors and retry
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(2)
         raise RuntimeError("Exhausted all retries in _call_with_retry")
 
-    async def _run_optimist(self, trimmed_context: dict) -> OptimistStance:
-        user_prompt = f"Career context:\n{json.dumps(trimmed_context, indent=2)}\n\nProvide your optimist recommendation."
+    async def _run_optimist(self, debate_payload: dict) -> OptimistStance:
+        user_prompt = f"Career context:\n{json.dumps(debate_payload, indent=2)}\n\nProvide your optimist recommendation."
         try:
-            raw = await self._call_with_retry(OPTIMIST_SYSTEM, user_prompt)
-            data = json.loads(_strip_json_fences(raw))
-            return OptimistStance(**data)
+            return await self._call_with_retry(OPTIMIST_SYSTEM, user_prompt, OptimistStance)
         except Exception as e:
-            logger.warning(f"[Debate] Optimist parsing failed: {e}. Using fallback.")
+            logger.warning(f"[Debate] Optimist failed: {e}. Using fallback.")
             return OptimistStance(
-                recommended_path="Could not parse optimist response",
+                recommended_path="Could not process optimist response",
                 rationale=str(e),
                 key_bets=[]
             )
 
-    async def _run_realist(self, trimmed_context: dict) -> RealistStance:
-        user_prompt = f"Career context:\n{json.dumps(trimmed_context, indent=2)}\n\nProvide your realist recommendation."
+    async def _run_realist(self, debate_payload: dict) -> RealistStance:
+        user_prompt = f"Career context:\n{json.dumps(debate_payload, indent=2)}\n\nProvide your realist recommendation."
         try:
-            raw = await self._call_with_retry(REALIST_SYSTEM, user_prompt)
-            data = json.loads(_strip_json_fences(raw))
-            return RealistStance(**data)
+            return await self._call_with_retry(REALIST_SYSTEM, user_prompt, RealistStance)
         except Exception as e:
-            logger.warning(f"[Debate] Realist parsing failed: {e}. Using fallback.")
+            logger.warning(f"[Debate] Realist failed: {e}. Using fallback.")
             return RealistStance(
-                recommended_path="Could not parse realist response",
+                recommended_path="Could not process realist response",
                 rationale=str(e),
                 key_bets=[]
             )
 
-    async def _run_critic(self, trimmed_context: dict) -> CriticStance:
-        user_prompt = f"Career context:\n{json.dumps(trimmed_context, indent=2)}\n\nIdentify the key risks and red flags."
+    async def _run_critic(self, debate_payload: dict) -> CriticStance:
+        user_prompt = f"Career context:\n{json.dumps(debate_payload, indent=2)}\n\nIdentify the key risks and red flags."
         try:
-            raw = await self._call_with_retry(CRITIC_SYSTEM, user_prompt)
-            data = json.loads(_strip_json_fences(raw))
-            return CriticStance(**data)
+            return await self._call_with_retry(CRITIC_SYSTEM, user_prompt, CriticStance)
         except Exception as e:
-            logger.warning(f"[Debate] Critic parsing failed: {e}. Using fallback.")
+            logger.warning(f"[Debate] Critic failed: {e}. Using fallback.")
             return CriticStance(
-                risks=[f"Could not parse critic response: {e}"],
+                risks=[f"Could not process critic response: {e}"],
                 red_flags=[]
             )
 
@@ -191,10 +166,10 @@ class MultiAgentDebateAgent:
         optimist: OptimistStance,
         realist: RealistStance,
         critic: CriticStance,
-        trimmed_context: dict,
+        debate_payload: dict,
     ) -> DebateVerdict:
         synthesis_input = {
-            "career_context_summary": trimmed_context.get("reasoning", ""),
+            "career_context_summary": debate_payload.get("retrieved_empirical_paths", {}).get("reasoning", ""),
             "optimist": optimist.model_dump(),
             "realist": realist.model_dump(),
             "critic": critic.model_dump(),
@@ -204,12 +179,9 @@ class MultiAgentDebateAgent:
             "Synthesize the three stances into a final consensus verdict."
         )
         try:
-            raw = await self._call_with_retry(SYNTHESIZER_SYSTEM, user_prompt)
-            data = json.loads(_strip_json_fences(raw))
-            return DebateVerdict(**data)
+            return await self._call_with_retry(SYNTHESIZER_SYSTEM, user_prompt, DebateVerdict)
         except Exception as e:
-            logger.warning(f"[Debate] Synthesizer parsing failed: {e}. Using fallback.")
-            # Simple heuristic: pick realist path when synthesis fails
+            logger.warning(f"[Debate] Synthesizer failed: {e}. Using fallback.")
             return DebateVerdict(
                 consensus_path=realist.recommended_path or optimist.recommended_path,
                 confidence=0.4,
@@ -241,7 +213,17 @@ class MultiAgentDebateAgent:
             logger.warning("[Debate] career_paths is neither dict nor Pydantic model. Skipping.")
             return {}
 
+        # CRITICAL FIX: Inject user profile into the debate context so the Critic can find gaps
+        user_profile_obj = state.get("user_profile", {})
+        user_profile_data = user_profile_obj.model_dump() if hasattr(user_profile_obj, "model_dump") else dict(user_profile_obj)
+
         trimmed_context = _trim_career_context(career_context)
+        
+        # Combine them into a single debate payload
+        debate_payload = {
+            "user_current_profile": user_profile_data,
+            "retrieved_empirical_paths": trimmed_context
+        }
 
         try:
             # 1. Start sub-agents concurrently (with slight staggered delay to help free tier quota)
@@ -251,15 +233,15 @@ class MultiAgentDebateAgent:
             logger.info("[Debate] Starting staggered sub-agent calls to respect API limits...")
             
             # Sub-agent 1: Optimist
-            optimist_task = self._run_optimist(trimmed_context)
+            optimist_task = self._run_optimist(debate_payload)
             await asyncio.sleep(2) # Wait 2s for quota
             
             # Sub-agent 2: Realist
-            realist_task = self._run_realist(trimmed_context)
+            realist_task = self._run_realist(debate_payload)
             await asyncio.sleep(2) # Wait 2s for quota
             
             # Sub-agent 3: Critic
-            critic_task = self._run_critic(trimmed_context)
+            critic_task = self._run_critic(debate_payload)
             
             # Gather stances
             optimist, realist, critic = await asyncio.gather(
@@ -269,7 +251,7 @@ class MultiAgentDebateAgent:
             await asyncio.sleep(2) # Wait 2s before synthesis
             
             # 2. Synthesize verdict
-            verdict = await self._synthesize(optimist, realist, critic, trimmed_context)
+            verdict = await self._synthesize(optimist, realist, critic, debate_payload)
 
             output = DebateOutput(
                 optimist_stance=optimist,

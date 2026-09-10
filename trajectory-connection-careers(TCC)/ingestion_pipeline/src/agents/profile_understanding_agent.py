@@ -20,9 +20,11 @@ class ProfileUnderstandingAgent(BaseAgent):
             raw_input = state.get("raw_user_input")
             if not raw_input:
                 raise ValueError("No raw_user_input found in state")
+                
+            parsed_resume = state.get("parsed_resume_text", "")
 
             # Build prompts
-            system, user = self.prompts.for_profile_understanding(raw_input)
+            system, user = self.prompts.for_profile_understanding(raw_input, parsed_resume)
             
             # Call LLM for structured output
             profile = await self.llm.generate_structured(

@@ -41,7 +41,7 @@ def get_credential_gap(text: str) -> int:
     return int(bool(re.search(r'\b(gap|missing|lack|need|without|certification|credential|degree)\b', text, re.I)))
 
 def extract_ras(text: str, retrieved_paths: List[Dict]) -> float:
-    max_reach = max([p.get('avg_reachability', 0) for p in retrieved_paths] + [1.0]) # avoid div 0
+    max_reach = max([getattr(p, 'reachability_score', p.get('reachability_score', 0)) if isinstance(p, dict) else getattr(p, 'reachability_score', 0) for p in retrieved_paths] + [1.0]) # avoid div 0
     if max_reach == 0: return 0.0
     
     # Simple heuristic: find highest reachability of paths that might be mentioned
@@ -51,12 +51,12 @@ def extract_ras(text: str, retrieved_paths: List[Dict]) -> float:
     words = set(re.findall(r'\w+', text.lower()))
     best_reach = 0.0
     for p in retrieved_paths:
-        p_desc = p.get('path_description', '').lower()
+        p_desc = (getattr(p, 'target_role', p.get('target_role', '')) if isinstance(p, dict) else getattr(p, 'target_role', '')).lower()
         p_words = set(re.findall(r'\w+', p_desc))
         if len(p_words) == 0: continue
         overlap = len(words.intersection(p_words)) / len(p_words)
         if overlap > 0.3: # Significant overlap
-            rc = p.get('avg_reachability', 0.0)
+            rc = getattr(p, 'reachability_score', p.get('reachability_score', 0.0)) if isinstance(p, dict) else getattr(p, 'reachability_score', 0.0)
             if rc > best_reach: best_reach = rc
             
     return best_reach / max_reach
@@ -72,7 +72,7 @@ async def run_method_a_single_agent(client, builder, state: AgentState) -> dict:
         paths = cp.recommended_paths if hasattr(cp, "recommended_paths") else cp.get("recommended_paths", [])
     else:
         paths = []
-    text = paths[0].path_description if paths and hasattr(paths[0], "path_description") else (paths[0].get("path_description", "") if paths and isinstance(paths[0], dict) else str(paths))
+    text = paths[0].description if paths and hasattr(paths[0], "description") else (paths[0].get("description", "") if paths and isinstance(paths[0], dict) else str(paths))
     return {"text": text, "latency": latency}
 
 async def run_method_b_majority_vote(client, builder, state: AgentState) -> dict:
@@ -91,7 +91,7 @@ async def run_method_b_majority_vote(client, builder, state: AgentState) -> dict
             else:
                 paths = []
             if paths:
-                desc = paths[0].path_description if hasattr(paths[0], "path_description") else paths[0].get("path_description", "")
+                desc = paths[0].description if hasattr(paths[0], "description") else paths[0].get("description", "")
                 texts.append(desc)
     
     text = max(set(texts), key=texts.count) if texts else "no paths"

@@ -10,34 +10,26 @@ class UserProfile(BaseModel):
     experience_level: Literal["student", "junior", "mid", "senior"] = Field(description="Current seniority level")
 
 class CareerPath(BaseModel):
-    path_description: str = Field(
+    description: str = Field(
         default="unknown path", 
-        description="Structured sequence of roles (e.g. A -> B -> C). Extract from the 'path_description' in context.",
-        alias="description"
+        description="Structured sequence of roles (e.g. A -> B -> C). Extract from the 'description' in context."
     )
-    supporting_candidate_ids: List[str] = Field(
+    supporting_candidates: List[str] = Field(
         default_factory=list, 
-        description="IDs of candidates following this exact path.",
-        alias="supporting_candidates"
+        description="IDs of candidates following this exact path."
     )
-    avg_reachability: float = Field(
+    reachability: float = Field(
         default=0.0, 
-        description="The average of 'avg_reachability' scores from the supporting candidates in context.",
-        alias="reachability"
+        description="The average reachability score from the supporting candidates in context."
     )
-    key_decision: str = Field(
+    decision: str = Field(
         default="unknown", 
-        description="The pivotal decision that triggered the transition. Extract from 'key_decision' in context.",
-        alias="decision"
+        description="The pivotal decision that triggered the transition. Extract from 'decision' in context."
     )
-    estimated_hops: int = Field(
+    hops: int = Field(
         default=0, 
-        description="Number of role transitions to reach goal. Count the steps in path_description.",
-        alias="hops"
+        description="Number of role transitions to reach goal. Count the steps in description."
     )
-
-    class Config:
-        populate_by_name = True
 
 class CareerPathOptions(BaseModel):
     recommended_paths: List[CareerPath] = Field(default_factory=list, description="Top 3 career trajectories from data")

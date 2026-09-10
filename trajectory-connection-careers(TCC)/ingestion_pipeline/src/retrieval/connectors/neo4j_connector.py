@@ -35,15 +35,17 @@ def _resolve_roles(interest: str, goal: str) -> List[str]:
             roles.update(role_list)
     
     # Also try goal directly as a slug (if ProfileUnderstanding returned a clean role)
-    clean_goal = goal.lower().replace(" ", "_").replace("-", "_")
+    clean_goal = goal.lower().replace("-", "_")
     roles.add(clean_goal)
     
     # Fallback: any token from interest that might be a partial role match
     for token in interest.lower().split():
-        if len(token) > 4:  # skip short words
+        if len(token) > 2:  # Changed from 4 to 2 to capture 'ai', 'ml'
             roles.add(token)
     
-    return list(roles) if roles else ["data_scientist", "software_engineer", "ml_engineer"]
+    # CRITICAL FIX: Convert slugs to space-separated strings for Neo4j text matching
+    final_roles = [r.replace("_", " ") for r in roles]
+    return final_roles if final_roles else ["data scientist", "software engineer", "ml engineer"]
 
 
 class Neo4jConnector:
@@ -56,10 +58,9 @@ class Neo4jConnector:
     def close(self):
         self.driver.close()
 
-    async def get_trajectory_paths(self, interest: str, goal: str, limit: int) -> Tuple[List[TrajectoryPath], bool]:
+    async def get_trajectory_paths(self, interest: str, goal: str, skills: List[str], limit: int) -> Tuple[List[TrajectoryPath], bool]:
         fallback_used = False
         paths = []
-
         role_terms = _resolve_roles(interest, goal)
         logger.info(f"Resolved role terms for interest='{interest}' goal='{goal}': {role_terms}")
 
@@ -67,15 +68,14 @@ class Neo4jConnector:
             with self.driver.session() as session:
                 # Primary: match via MADE_DECISION → TRIGGERED_TRANSITION → Job role
                 primary_query = """
-                MATCH (c:Candidate)-[:MADE_DECISION]->(d:Decision)
-                      -[:TRIGGERED_TRANSITION]->(j:Job)
+                MATCH (c:Candidate)-[:MADE_DECISION]->(d:Decision)-[:TRIGGERED_TRANSITION]->(j:Job)
                 WHERE any(term IN $role_terms WHERE toLower(j.role) CONTAINS term)
-                RETURN c.user_id            AS candidate_id,
-                       c.reachability_score AS reachability,
-                       d.text               AS decision_text,
-                       d.trigger            AS trigger,
-                       j.role               AS target_role
-                ORDER BY c.reachability_score DESC
+                RETURN coalesce(c.id, c.user_id) AS candidate_id,
+                       coalesce(c.reachability_score, 1.0) AS reachability,
+                       coalesce(d.text, "Unknown Decision") AS decision_text,
+                       coalesce(d.trigger, "Unknown Trigger") AS trigger,
+                       j.role AS target_role
+                ORDER BY reachability DESC
                 LIMIT $limit
                 """
                 result = session.run(primary_query, role_terms=role_terms, limit=limit)
@@ -83,61 +83,57 @@ class Neo4jConnector:
 
                 if not rows:
                     fallback_used = True
-                    logger.info("Primary query returned 0 rows, trying CURRENT_ROLE fallback.")
                     fallback_query = """
                     MATCH (c:Candidate)-[:CURRENT_ROLE]->(j:Job)
                     WHERE any(term IN $role_terms WHERE toLower(j.role) CONTAINS term)
-                    RETURN c.user_id            AS candidate_id,
-                           c.reachability_score AS reachability,
-                           j.role               AS target_role,
-                           "Current role match"  AS decision_text,
-                           "Role similarity"     AS trigger
-                    ORDER BY c.reachability_score DESC
+                    RETURN coalesce(c.id, c.user_id) AS candidate_id,
+                           coalesce(c.reachability_score, 1.0) AS reachability,
+                           j.role AS target_role,
+                           "Current role match" AS decision_text,
+                           "Role similarity" AS trigger
+                    ORDER BY reachability DESC
                     LIMIT $limit
                     """
                     result = session.run(fallback_query, role_terms=role_terms, limit=limit)
                     rows = result.data()
 
-                if not rows:
+                if not rows and skills:
                     fallback_used = True
-                    logger.info("Both queries returned 0 rows, using broad skill-based fallback.")
-                    # Last resort: find candidates with relevant skills
-                    skill_terms = [t for t in interest.lower().split() if len(t) > 3]
+                    # Use explicit skills instead of string parsing
+                    lower_skills = [s.lower() for s in skills]
                     broad_query = """
                     MATCH (c:Candidate)-[:HAS_SKILL]->(s:Skill)
                     WHERE any(term IN $skill_terms WHERE toLower(s.name) CONTAINS term)
                     WITH c, collect(s.name) AS matched_skills
                     OPTIONAL MATCH (c)-[:CURRENT_ROLE]->(j:Job)
-                    RETURN c.user_id            AS candidate_id,
-                           c.reachability_score AS reachability,
-                           coalesce(j.role, "software_engineer") AS target_role,
-                           "Skill-based match"   AS decision_text,
-                           head(matched_skills)  AS trigger
-                    ORDER BY c.reachability_score DESC
+                    RETURN coalesce(c.id, c.user_id) AS candidate_id,
+                           coalesce(c.reachability_score, 1.0) AS reachability,
+                           coalesce(j.role, "software engineer") AS target_role,
+                           "Skill-based match" AS decision_text,
+                           head(matched_skills) AS trigger
+                    ORDER BY reachability DESC
                     LIMIT $limit
                     """
-                    result = session.run(broad_query, skill_terms=skill_terms, limit=limit)
+                    result = session.run(broad_query, skill_terms=lower_skills, limit=limit)
                     rows = result.data()
 
                 for row in rows:
                     paths.append(TrajectoryPath(
                         candidate_id=row["candidate_id"],
-                        reachability_score=float(row["reachability"] or 0.0),
-                        decision_text=row["decision_text"] or "",
-                        trigger=row["trigger"] or "",
-                        target_role=row["target_role"] or ""
+                        reachability_score=float(row["reachability"]),
+                        decision_text=row["decision_text"],
+                        trigger=row["trigger"],
+                        target_role=row["target_role"]
                     ))
-
         except Exception as e:
             logger.error(f"Neo4j get_trajectory_paths failed: {e}")
             raise
 
         return paths, fallback_used
 
-    async def get_behavioral_signals(self, domain: str, interest: str, limit: int) -> List[BehavioralSignal]:
+    async def get_behavioral_signals(self, domain: str, interest: str, skills: List[str], limit: int) -> List[BehavioralSignal]:
         signals = []
-        skill_terms = [t for t in (domain + " " + interest).lower().split() 
-                       if len(t) > 3]
+        skill_terms = [s.lower() for s in skills] + [interest.lower(), domain.lower()]
         
         try:
             with self.driver.session() as session:

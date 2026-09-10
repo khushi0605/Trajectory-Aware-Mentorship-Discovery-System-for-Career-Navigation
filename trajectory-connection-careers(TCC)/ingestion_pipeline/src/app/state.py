@@ -12,6 +12,7 @@ class AgentState(TypedDict):
     """
     # Input
     raw_user_input: str
+    parsed_resume_text: Optional[str]
 
     # Agent 1 output
     user_profile: Optional[UserProfile]
