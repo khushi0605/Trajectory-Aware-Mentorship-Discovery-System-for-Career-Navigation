@@ -142,12 +142,12 @@ streamlit run app_eval_dashboard.py
 
 When evaluated on the 50 hold-out profiles, the GG-MAD architecture demonstrated massive quantitative improvements over a standard, ungrounded Gemini baseline. Furthermore, the automated LLM-as-a-Judge evaluation achieved a strong Pearson correlation of **$r = 0.88$** with human domain experts.
 
-| Metric | Description | GG-MAD Improvement vs. Baseline |
-| :--- | :--- | :--- |
-| **Empirical Grounding (EG)** | Reliance on verifiable historical datasets and reachability scores. | **+323.8%** |
-| **Feasibility Risk Awareness (FRA)** | Accurate identification of mathematical and credential blockers. | **+81.4%** |
-| **Mentorship Tangibility (MT)** | Provision of explicit, near-peer mentor profiles and historical transition proofs. | **+105.7%** |
-| **Goal-Skill Alignment (GSA)** | Logical bridging of starting skills to aspirational goals via historical data. | **+55.8%** |
+| Metric | Gemini Baseline (Mean) | GG-MAD (Mean) | Improvement (%) |
+| :--- | :--- | :--- | :--- |
+| **Empirical Grounding (EG)** | 7.38 | 8.02 | **+8.67%** |
+| **Feasibility Risk (FRA)** | 6.28 | 7.88 | **+25.47%** |
+| **Actionability (ANP)** | 6.88 | 8.46 | **+23.0%** |
+| **Goal Alignment (GSA)** | 7.28 | 7.82 | **+7.41%** |
 
 ---
 
