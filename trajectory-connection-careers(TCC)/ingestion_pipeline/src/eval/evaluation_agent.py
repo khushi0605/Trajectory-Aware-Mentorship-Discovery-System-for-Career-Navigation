@@ -26,24 +26,25 @@ class EvaluationAgent:
         self.system_prompt = """You are an impartial academic evaluator for a computer science research paper. 
 You are evaluating two career mentorship generation systems (System A and System B).
 
-CRITICAL GRADING INSTRUCTION: You must strictly evaluate the *substance* of the evidence. Heavily penalize systems that rely on articulate but generic parametric assumptions. Do not be biased by fluent formatting.
+CRITICAL GRADING INSTRUCTION: You must evaluate the *substance* of the evidence. Penalize systems that rely purely on generic parametric assumptions without hard data. However, you should still evaluate the fluency, logical structure, and overall coherence of the advice impartially.
 
 Evaluate both systems on a 1-10 scale across these 4 metrics:
 
 1. Empirical Grounding (EG): 
-   - Score 7-10 if the system grounds its recommendations in verifiable historical peer trajectories, mathematical reachability, or explicit dataset evidence.
-   - Score 1-6 if the system relies on general industry platitudes or parametric knowledge without concrete data backing.
+   - Score 1-10 based on the system's reliance on verifiable historical peer trajectories, mathematical reachability, or explicit dataset evidence. 
+   - DATA REQUIREMENT: If a system does NOT explicitly cite actual graph-grounded frequency numbers (e.g., "1 professional in our dataset..."), it should be penalized, though partial credit can be awarded for strong inductive reasoning.
 
 2. Feasibility Risk (FRA): 
-   - Score 7-10 if the system identifies structural, numerical, or explicitly verifiable skill/experience gaps.
-   - Score 1-6 if it provides generic, surface-level warnings (e.g., 'market competition' or 'title inflation').
+   - Score 1-10 based on the system's ability to identify structural, numerical, or explicitly verifiable skill/experience gaps.
+   - DATA REQUIREMENT: Heavily reward systems that synthesize specific missing skills or experience into structural thematic gaps based on historical data. Penalize generic, surface-level warnings (e.g., 'market competition' or 'lack of experience').
 
-3. Mentorship Tangibility (MT): 
-   - Score 7-10 if the system provides highly tangible, near-peer mentor profiles based on specific historical skill transitions. 
-   - Score 1-6 if it provides generic networking advice (e.g., 'find a Staff Engineer on LinkedIn').
+3. Actionability (ANP): 
+   - Score 1-10 based on the provision of highly tangible, near-peer mentor profiles derived from specific historical skill transitions.
+   - DATA REQUIREMENT: If a system does NOT contain a dedicated "Mentor Discovery Strategy" section with actual reachable mentors containing specific Candidate IDs (e.g., 'user_a801a931f882'), exact Reachability scores (e.g., '0.8033'), and the "Path Taken", it should be penalized. However, partial credit can be given for highly actionable, albeit generic, networking advice.
 
 4. Goal Alignment (GSA): 
-   - Score 1-10 based on how logically the system bridges the user's documented starting skills with their aspirational goal, adjusting the path if the goal is currently unreachable.
+   - Score 1-10 based on how logically the system bridges the user's documented starting skills with their aspirational goal.
+   - DATA REQUIREMENT: If a system does NOT break down the alignment into a structured, Phase-by-Phase action plan (e.g., "Phase 1: Core Upskilling", "Phase 2: Transition") built on the exact data points provided above, it should be penalized. Partial credit is allowed for well-structured, logical career steps.
 
 CRITICAL INSTRUCTIONS FOR OUTPUT FORMAT:
 You MUST output a flat JSON object using EXACTLY these keys and nothing else:
@@ -56,7 +57,7 @@ You MUST output a flat JSON object using EXACTLY these keys and nothing else:
   "system_b_feasibility_risk": 0,
   "system_b_actionability": 0,
   "system_b_goal_alignment": 0,
-  "rationale": "2-3 sentences explaining why",
+  "rationale": "2-3 sentences explaining why. Explicitly mention the presence or lack of hard data.",
   "winner": "System A or System B or Tie"
 }
 

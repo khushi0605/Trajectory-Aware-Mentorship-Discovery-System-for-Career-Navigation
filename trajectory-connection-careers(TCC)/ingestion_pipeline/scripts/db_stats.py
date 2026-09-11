@@ -43,16 +43,16 @@ def query_neo4j():
         stats["relationship_counts"] = rel_counts
         stats["total_relationships"] = sum(rel_counts.values())
 
-        # Reachability stats across all TrajectoryPath nodes
+        # Reachability stats across Candidate nodes
         rs = sess.run("""
-            MATCH (t:TrajectoryPath)
-            WHERE t.reachability_score IS NOT NULL
+            MATCH (c:Candidate)
+            WHERE c.reachability_score IS NOT NULL
             RETURN
-                avg(t.reachability_score)  AS avg_r,
-                min(t.reachability_score)  AS min_r,
-                max(t.reachability_score)  AS max_r,
-                count(t)                   AS total,
-                count(CASE WHEN t.reachability_score >= 0.6 THEN 1 END) AS above_threshold
+                avg(c.reachability_score)  AS avg_r,
+                min(c.reachability_score)  AS min_r,
+                max(c.reachability_score)  AS max_r,
+                count(c)                   AS total,
+                count(CASE WHEN c.reachability_score >= 0.6 THEN 1 END) AS above_threshold
         """).single()
 
         if rs and rs["total"]:

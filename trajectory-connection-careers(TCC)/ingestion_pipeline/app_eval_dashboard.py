@@ -17,7 +17,7 @@ llm = LLMClient(llm_config)
 
 st.set_page_config(page_title="GG-MAD Evaluation Dashboard", layout="wide")
 
-TCC_DIR = "outputs/tcc_results"
+TCC_DIR = "outputs/tcc_refined_results"
 GEMINI_DIR = "outputs/gemini_llm_results"
 
 st.title("📊 GG-MAD Evaluation & Results Tabulation")
