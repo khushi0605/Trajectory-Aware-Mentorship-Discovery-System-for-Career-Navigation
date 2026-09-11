@@ -1,9 +1,9 @@
 provider: "ollama"
 
 ollama:
-  model: "qwen2.5-coder:3b"
+  model: "qwen2.5:14b"
   api_key: "ollama"
-  base_url: "http://localhost:11434"
+  base_url: "https://de85-2401-4900-1f26-61ca-54ce-14b5-2b30-99f7.ngrok-free.app/"
   temperature: 0.1
   max_output_tokens: 4096
   timeout_seconds: 60

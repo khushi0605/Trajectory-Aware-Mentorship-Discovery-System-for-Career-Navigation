@@ -25,7 +25,8 @@ class UnifiedLLMClient:
                 model=config.ollama.model,
                 base_url=config.ollama.base_url,
                 temperature=config.ollama.temperature,
-                timeout=config.ollama.timeout_seconds
+                timeout=config.ollama.timeout_seconds,
+                headers={"ngrok-skip-browser-warning": "true"}
             )
             self.config = config.ollama
         elif self.provider == "groq":
@@ -146,6 +147,8 @@ class UnifiedLLMClient:
                 schema_json = json.dumps(schema_dict, indent=2)
                 full_system = f"{system_prompt}\n\nReturn ONLY a JSON object matching this schema:\n{schema_json}"
                 raw_response = await self.generate(full_system, user_prompt, temperature=temp)
+                logger.debug(f"Raw LLM Response:\n{raw_response}")
+                print(f"\n[DEBUG] Raw LLM Response:\n{raw_response}\n")
                 return ResponseParser.validate_against(raw_response, response_schema)
 
         # Inject schema into system prompt for groq/openai
